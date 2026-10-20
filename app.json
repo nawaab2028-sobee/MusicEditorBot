@@ -2,16 +2,16 @@
   "name": "MusicEditor",
   "env": {
     "API_ID": {
-      "description": "Add your telegram API_ID",
-      "value": ""
+      "description": "..",
+      "value": "22518279"
     },
     "API_HASH": {
-      "description": "Add your telegram API_HASH",
-      "value": ""
+      "description": "..",
+      "value": "61e5cc94bc5e6318643707054e54caf4"
     },
     "BOT_TOKEN": {
-      "description": "Your bot token, as a string.",
-      "value": ""
+      "description": "..",
+      "value": "8371349393:AAF9LVAwBaUIUTCLrIV62PnjhdZBTqdO43I"
 }
   },
   "buildpacks": [
