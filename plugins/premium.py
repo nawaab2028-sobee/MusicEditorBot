@@ -1,5 +1,5 @@
 """
-Premium system (Save Restricted bot jaisa): /myplan, /premium + owner commands
+Premium system (same as the Save Restricted bot): /myplan, /premium + owner commands
 /add_premium, /remove_premium, /addauth, /rmauth
 """
 
@@ -99,7 +99,7 @@ async def add_premium_admin(client: Client, message: Message):
             f"<b>✅ Premium Added Successfully</b>\n\n<b>User ID:</b> <code>{user_id}</code>\n<b>Duration:</b> {duration}",
             parse_mode=HTML)
         try:
-            await client.send_message(user_id, "🎉 <b>Premium activate ho gaya!</b>\nAb aapke liye koi daily limit nahi. /myplan dekho.",
+            await client.send_message(user_id, "🎉 <b>Premium has been activated!</b>\nThere is no daily limit for you now. Check /myplan.",
                                       parse_mode=HTML)
         except Exception:
             pass
@@ -126,7 +126,7 @@ async def add_auth_cmd(client: Client, message: Message):
     if len(message.command) < 2:
         return await message.reply_text(
             "<b>⚠️ Owner Usage:</b>\n<code>/addauth &lt;user_id&gt; [days]</code>\n\n"
-            "<i>Days default 7. User ko unlimited access milta hai expiry tak.</i>", parse_mode=HTML)
+            "<i>Days default to 7. The user gets unlimited access until expiry.</i>", parse_mode=HTML)
     try:
         user_id = int(message.command[1])
         days = int(message.command[2]) if len(message.command) > 2 else 7

@@ -1,5 +1,5 @@
 """
-Owner tools: /stats, /broadcast, /ban, /unban  (+ banned users ko block)
+Owner tools: /stats, /broadcast, /ban, /unban  (+ blocks banned users)
 """
 
 import asyncio
@@ -19,21 +19,21 @@ HTML = enums.ParseMode.HTML
 START_TIME = time.time()
 
 
-# --- banned users ko har cheez se rok do (group -1 = sabse pehle) ---
+# --- block banned users from everything (group -2 = runs first) ---
 @Client.on_message(filters.private & filters.incoming, group=-2)
 async def ban_gate_msg(client: Client, message: Message):
     u = message.from_user
     if not u or u.id == OWNER_ID:
         return
     if await db.is_banned(u.id):
-        await message.reply_text("🚫 Aap is bot se banned hain.")
+        await message.reply_text("🚫 You are banned from this bot.")
         message.stop_propagation()
 
 
 @Client.on_callback_query(group=-2)
 async def ban_gate_cb(client: Client, cq: CallbackQuery):
     if cq.from_user.id != OWNER_ID and await db.is_banned(cq.from_user.id):
-        await cq.answer("🚫 Aap banned hain.", show_alert=True)
+        await cq.answer("🚫 You are banned.", show_alert=True)
         cq.stop_propagation()
 
 

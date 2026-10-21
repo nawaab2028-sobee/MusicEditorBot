@@ -1,6 +1,6 @@
 """
-Incoming audio (direct), Merge collection, aur plain t.me link (single/range) handling.
-group=1: typed-input router (editor.py, group 0) pehle chalta hai aur consume kare to yahan nahi aata.
+Incoming audio (direct), Merge collection, and plain t.me link (single/range) handling.
+group=1: the typed-input router (editor.py, group 0) runs first, and if it consumes the message it does not reach here.
 """
 
 from pyrogram import Client, filters
@@ -17,7 +17,7 @@ from helpers.state import MERGE
 async def audio_handler(client: Client, message: Message):
     media = get_audio_media(message)
     if media is None:
-        return  # audio nahi hai (pdf, zip...) - ignore
+        return  # not audio (pdf, zip...) - ignore
     uid = message.from_user.id
     await db.get_user(uid, message.from_user.first_name)
     if uid in MERGE:
@@ -27,7 +27,7 @@ async def audio_handler(client: Client, message: Message):
 
 @Client.on_message(filters.private & filters.incoming & filters.text & ~filters.regex(r"^/"), group=1)
 async def link_handler(client: Client, message: Message):
-    """Seedha t.me link bhejo (single ya range 100-110) to batch ki tarah process hoga."""
+    """If a t.me link (single or range 100-110) is sent directly, it will be processed like a batch."""
     text = message.text or ""
     if "t.me/" not in text:
         return

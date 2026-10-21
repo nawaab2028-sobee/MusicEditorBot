@@ -1,4 +1,4 @@
-# Login system (Save Restricted bot wala, same) - private channel batch ke liye
+# Login system (same as the Save Restricted bot) - for private channel batch
 
 import asyncio
 from pyrogram import Client, filters
@@ -108,11 +108,11 @@ async def cancel_login(client: Client, message: Message):
             reply_markup=remove_keyboard
         )
     else:
-        # Login nahi chal raha: pending input (artist/title/batch link...) cancel karo
+        # No login in progress: cancel the pending input (artist/title/batch link...)
         from helpers.state import INPUT, MERGE
         had = INPUT.pop(user_id, None) is not None or MERGE.pop(user_id, None) is not None
         await message.reply(
-            "<b>❌ Cancelled.</b>" if had else "ℹ️ Cancel karne ke liye kuch nahi hai. Chalta process rokne ke liye /stop use karo.",
+            "<b>❌ Cancelled.</b>" if had else "ℹ️ There is nothing to cancel. Use /stop to stop a running process.",
             parse_mode=enums.ParseMode.HTML,
             reply_markup=remove_keyboard,
         )

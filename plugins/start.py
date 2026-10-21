@@ -29,31 +29,31 @@ START_TXT = """<b>👋 Hello {mention},</b>
 📁 Batch Process  •  🔗 Merge Audio
 📢 Auto-send to your Channel</b></blockquote>
 <b>🎧 Send me any audio to get started!</b>
-<i>Neeche ke buttons se apni settings set karo.</i>
+<i>Set your settings using the buttons below.</i>
 
 Check /status to see your current config.
 Use /stop to clear your queue and stop processing."""
 
 HELP_TXT = """<b>📚 Audio Editor - Help</b>
 
-<blockquote><b>1️⃣ Settings set karo</b>
-/start kholo aur buttons se Artist, Cover, Title, Voice Tag, Trim, Caption, Auto Delete set karo. Settings save rehti hain.</blockquote>
-<blockquote><b>2️⃣ Audio bhejo</b>
-Koi bhi audio bhejo - bot download karke edit karega aur wapas bhej dega.</blockquote>
+<blockquote><b>1️⃣ Set your settings</b>
+Open /start and set Artist, Cover, Title, Voice Tag, Trim, Caption and Auto Delete using the buttons. Settings stay saved.</blockquote>
+<blockquote><b>2️⃣ Send audio</b>
+Send any audio - the bot will download it, edit it and send it back.</blockquote>
 <blockquote><b>3️⃣ Batch Process</b>
-Channel ki audios ek saath: pehla aur aakhri post link do, ya seedha <code>https://t.me/channel/100-110</code>. Private channel ke liye pehle /login.</blockquote>
+Process channel audios together: give the first and last post links, or directly send <code>https://t.me/channel/100-110</code>. For a private channel, use /login first.</blockquote>
 <blockquote><b>4️⃣ Merge Audio</b>
-Merge button dabao, audios bhejo, <b>Merge Now</b> dabao.</blockquote>
+Press the Merge button, send the audios, then press <b>Merge Now</b>.</blockquote>
 <blockquote><b>5️⃣ Trim</b>
-Time format: <code>SS</code>, <code>MM:SS</code> ya <code>HH:MM:SS</code></blockquote>
+Time format: <code>SS</code>, <code>MM:SS</code> or <code>HH:MM:SS</code></blockquote>
 
 <b>📱 Commands</b>
-/start - Panel kholo
-/status - Aapki saari settings
-/stop - Queue clear + processing stop
+/start - Open the panel
+/status - All your settings
+/stop - Clear queue + stop processing
 /myplan - Plan & daily limit
 /login /logout - Private channel access
-/cancel - Current input cancel
+/cancel - Cancel the current input
 
 <b>🛑 Free users:</b> {limit} audio / 24 hours  •  <b>💎 Premium:</b> Unlimited"""
 
@@ -186,15 +186,15 @@ async def stop_cmd(client: Client, message: Message):
     if cleared or was_running or had_state:
         parts = []
         if was_running:
-            parts.append("chalta hua process roka")
+            parts.append("stopped the running process")
         if cleared:
-            parts.append(f"{cleared} queued file(s) clear ki")
+            parts.append(f"cleared {cleared} queued file(s)")
         if had_state:
-            parts.append("pending input/merge list clear kiya")
+            parts.append("cleared pending input/merge list")
         await message.reply_text("🛑 <b>Stopped!</b>\n\n" + "\n".join(f"• {p}" for p in parts),
                                  parse_mode=enums.ParseMode.HTML, quote=True)
     else:
-        await message.reply_text("ℹ️ Abhi koi process ya queue nahi chal rahi.", quote=True)
+        await message.reply_text("ℹ️ No process or queue is running right now.", quote=True)
 
 
 @Client.on_callback_query(filters.regex(r"^close_btn$"))
