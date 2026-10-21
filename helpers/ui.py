@@ -2,7 +2,7 @@
 UI helpers: keyboards (Blue/Green/Red) + send/edit wrappers.
 
 Button = (text, callback_data, style)   style: "primary"(blue) | "success"(green) | "danger"(red) | None
-Pehle Bot API HTTP se bhejte hain (colors ke liye), fail ho to Pyrogram se normal buttons.
+Messages are sent via Bot API HTTP first (for colors); if that fails, normal buttons are sent via Pyrogram.
 """
 
 from pyrogram import enums
@@ -15,7 +15,7 @@ from logger import LOGGER
 logger = LOGGER(__name__)
 
 BLUE, GREEN, RED = "primary", "success", "danger"
-KEEP = object()  # edit(): markup ko jaisa hai waisa rehne do
+KEEP = object()  # edit(): keep the markup as it is
 
 
 # ======================================================
@@ -23,7 +23,7 @@ KEEP = object()  # edit(): markup ko jaisa hai waisa rehne do
 # ======================================================
 
 def to_markup(rows):
-    """Plain (uncolored) Pyrogram markup - fallback ke liye."""
+    """Plain (uncolored) Pyrogram markup - for fallback."""
     def _btn(t, d):
         if str(d).startswith(("http://", "https://", "tg://")):
             return InlineKeyboardButton(t, url=d)
@@ -33,7 +33,7 @@ def to_markup(rows):
 
 
 def panel_rows(doc):
-    """Main 11-button editor panel (screenshot jaisa)."""
+    """Main 11-button editor panel (as in the screenshot)."""
     caption_on = doc.get("caption_on", True)
     autodel = doc.get("autodel")
     delinput = doc.get("delinput")
@@ -73,16 +73,16 @@ def confirm_rows(action):
 
 def end_mode_rows():
     return [
-        [("✂️ Last se hatao (remove last N sec)", "et:last", BLUE)],
-        [("⏱ Is time par khatam (end at time)", "et:at", BLUE)],
+        [("✂️ Remove from End (remove last N sec)", "et:last", BLUE)],
+        [("⏱ End at This Time (end at time)", "et:at", BLUE)],
         [("❌ Cancel", "in:cancel", RED)],
     ]
 
 
 def title_inc_rows():
     return [
-        [("🔢 Yes, number badhao", "ti:y", GREEN)],
-        [("📌 No, same title sab par", "ti:n", BLUE)],
+        [("🔢 Yes, increase the number", "ti:y", GREEN)],
+        [("📌 No, same title on all", "ti:n", BLUE)],
         [("❌ Cancel", "in:cancel", RED)],
     ]
 
@@ -120,17 +120,17 @@ def delinput_rows():
 def autodel_text(doc):
     autodel = doc.get("autodel")
     delinput = doc.get("delinput")
-    up = f"ON ({fmt_delay(autodel)} baad delete)" if autodel else "OFF (Files not deleted)"
+    up = f"ON (deleted after {fmt_delay(autodel)})" if autodel else "OFF (Files not deleted)"
     if delinput is None:
         inp = "DISABLED ❌"
     else:
-        inp = "ENABLED ✅" + ("" if delinput == 0 else f" ({fmt_delay(delinput)} baad)")
+        inp = "ENABLED ✅" + ("" if delinput == 0 else f" (after {fmt_delay(delinput)})")
     return (
         "⏳ <b>Auto Delete System Settings</b>\n\n"
         f"• <b>Uploaded File Deletion:</b> {up}\n"
         f"• <b>Input Message Deletion:</b> {inp}\n\n"
         "Choose how long after uploading the bot should automatically delete the audio files from Telegram:\n"
-        "<i>(Target channel ke posts delete nahi hote.)</i>"
+        "<i>(Posts in the target channel are not deleted.)</i>"
     )
 
 
@@ -139,13 +139,13 @@ def delinput_text(doc):
     if delinput is None:
         cur = "DISABLED ❌"
     elif delinput == 0:
-        cur = "ENABLED ✅ (process hone ke turant baad)"
+        cur = "ENABLED ✅ (immediately after processing)"
     else:
-        cur = f"ENABLED ✅ ({fmt_delay(delinput)} baad)"
+        cur = f"ENABLED ✅ (after {fmt_delay(delinput)})"
     return (
         "🗑 <b>Delete Input Settings</b>\n\n"
         f"• <b>Input Message Deletion:</b> {cur}\n\n"
-        "Aapki bheji hui original audio kitni der baad delete ho:"
+        "Choose how long after processing your original audio should be deleted:"
     )
 
 
@@ -160,7 +160,7 @@ def _reply_params(reply_to):
 
 
 async def send(client, chat_id, text, rows=None, photo=None, reply_to=None):
-    """Message bhejo (rows ho to colored buttons). Returns message_id."""
+    """Send a message (colored buttons if rows are given). Returns message_id."""
     markup = botapi.serialize_rows(rows) if rows else None
     try:
         if photo:
@@ -194,9 +194,9 @@ async def send(client, chat_id, text, rows=None, photo=None, reply_to=None):
 
 async def edit(client, chat_id, message_id, text=None, rows=KEEP, is_photo=False):
     """
-    text=None  -> sirf buttons badlo
-    rows=KEEP  -> buttons waise hi
-    rows=None  -> buttons hata do
+    text=None  -> change only the buttons
+    rows=KEEP  -> keep the buttons as they are
+    rows=None  -> remove the buttons
     """
     try:
         if text is None:
@@ -247,7 +247,7 @@ async def delete(client, chat_id, ids):
 
 
 async def refresh_panel(client, uid, doc, panel=None):
-    """Latest panel ke buttons (Caption ON/OFF, Auto Delete label...) update karo."""
+    """Update the buttons of the latest panel (Caption ON/OFF, Auto Delete label...)."""
     from helpers.state import PANEL
     info = panel or PANEL.get(uid)
     if not info:

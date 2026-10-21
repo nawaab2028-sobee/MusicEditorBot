@@ -1,9 +1,9 @@
 """
 Direct Telegram Bot API (HTTP) calls.
 
-Kyun: Blue / Green / Red colored inline buttons Bot API ke `style` field se aate hain
-(primary / success / danger). Pyrogram ka version isse support kare ya na kare, yeh
-HTTP route hamesha chalta hai. Callback queries normal tareeke se Pyrogram handlers me hi aate hain.
+Why: Blue / Green / Red colored inline buttons come from the Bot API `style` field
+(primary / success / danger). Whether or not the Pyrogram version supports it, this
+HTTP route always works. Callback queries still arrive through the normal Pyrogram handlers.
 """
 
 import asyncio

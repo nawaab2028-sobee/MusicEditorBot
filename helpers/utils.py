@@ -1,4 +1,4 @@
-"""Chhote common helpers."""
+"""Small common helpers."""
 
 import html
 import re
@@ -37,7 +37,7 @@ def fmt_duration(seconds) -> str:
 
 
 def fmt_trim(seconds) -> str:
-    """Trim time ko dikhane ke liye: 90 -> 1:30 , 90.5 -> 1:30.50"""
+    """Display format for trim time: 90 -> 1:30 , 90.5 -> 1:30.50"""
     sec = float(seconds)
     shown = fmt_duration(int(sec))
     frac = sec - int(sec)
@@ -64,8 +64,8 @@ def fmt_delay(seconds: int) -> str:
 
 def parse_time(text):
     """
-    xVettBot wala format: SS | MM:SS | HH:MM:SS  (seconds me decimal bhi chalega).
-    Valid -> float seconds, galat -> None.
+    xVettBot format: SS | MM:SS | HH:MM:SS  (decimals are also allowed in seconds).
+    Valid -> float seconds, invalid -> None.
     """
     if text is None:
         return None
@@ -88,7 +88,7 @@ def parse_time(text):
                 nums.append(int(p))
     except ValueError:
         return None
-    # Higher unit ke saath aane par minutes/seconds < 60 hone chahiye
+    # When a higher unit is present, minutes/seconds must be < 60
     if len(nums) >= 2 and nums[-1] >= 60:
         return None
     if len(nums) == 3 and nums[1] >= 60:
@@ -109,13 +109,13 @@ _TITLE_NUM_RE = re.compile(r"^(.*?)(\d+)\s*$", re.S)
 
 
 def parse_title_counter(text: str):
-    """'Song 1' -> ('Song ', 1, 1) | 'Part 007' -> ('Part ', 7, 3) | number nahi -> None"""
+    """'Song 1' -> ('Song ', 1, 1) | 'Part 007' -> ('Part ', 7, 3) | no number -> None"""
     m = _TITLE_NUM_RE.match(text.strip())
     if not m:
         return None
     prefix, digits = m.group(1), m.group(2)
     if not prefix.strip():
-        return None  # sirf number = title nahi maana jaata
+        return None  # a number alone is not treated as a title
     return prefix, int(digits), len(digits)
 
 
@@ -124,7 +124,7 @@ def make_counter_title(prefix: str, n: int, width: int) -> str:
 
 
 def current_title(doc):
-    """User doc se abhi ka title (ya None = original)."""
+    """Current title from the user doc (or None = original)."""
     base = doc.get("title")
     if not base:
         return None
@@ -135,7 +135,7 @@ def current_title(doc):
 
 def parse_chat_ref(text: str):
     """
-    Channel input -> '@username' ya int chat_id. Galat ho to None.
+    Channel input -> '@username' or int chat_id. Invalid -> None.
       @name | name | https://t.me/name | -1001234567890 | 1234567890 (=> -100 add)
     """
     t = (text or "").strip()

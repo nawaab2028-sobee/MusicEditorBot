@@ -1,9 +1,9 @@
 """
 Per-user job queue.
 
-* Har user ke jobs ek ke baad ek chalte hain (order maintain rehta hai)
-* Global semaphore: ek saath max MAX_CONCURRENT_JOBS ffmpeg jobs (server RAM bachane ke liye)
-* /stop: chalta hua job cancel + queue clear
+* Each user's jobs run one after another (order is maintained)
+* Global semaphore: at most MAX_CONCURRENT_JOBS ffmpeg jobs run at the same time (to save server RAM)
+* /stop: cancels the running job and clears the queue
 """
 
 import asyncio
@@ -27,9 +27,9 @@ def _sem():
 class Job:
     def __init__(self, run, weight=1, kind="audio", on_dropped=None):
         self.run = run              # async callable
-        self.weight = weight        # kitni audio count hoti hai (limit reservation)
+        self.weight = weight        # how many audios it counts as (limit reservation)
         self.kind = kind            # audio | batch | merge
-        self.on_dropped = on_dropped  # async callable: queue se hatane par (/stop)
+        self.on_dropped = on_dropped  # async callable: called when removed from the queue (/stop)
 
 
 class _UserJobs:
@@ -50,7 +50,7 @@ def _get(uid):
 
 
 def pending_weight(uid):
-    """Queue + running jobs ki total audio count (daily-limit reservation ke liye)."""
+    """Total audio count of queued + running jobs (for daily-limit reservation)."""
     uj = JOBS.get(uid)
     if not uj:
         return 0
@@ -61,7 +61,7 @@ def pending_weight(uid):
 
 
 def queue_position(uid):
-    """Naya job add hone ke baad uski position (1 = turant chalega)."""
+    """Position of a newly added job (1 = runs immediately)."""
     uj = JOBS.get(uid)
     if not uj:
         return 0
@@ -101,7 +101,7 @@ async def _runner(uid):
 
 async def stop_all(uid):
     """
-    /stop: queue clear + running job cancel.
+    /stop: clears the queue and cancels the running job.
     Returns (cleared_jobs_weight, was_running)
     """
     uj = JOBS.get(uid)

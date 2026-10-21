@@ -1,4 +1,4 @@
-"""/myplan text builder (Save Restricted bot ke premium.py wala system, same UI)."""
+"""/myplan text builder (same system and UI as premium.py of the Save Restricted bot)."""
 
 from datetime import datetime
 

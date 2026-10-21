@@ -1,19 +1,19 @@
 """
-In-memory state (restart par reset hota hai - user bas button dobara dabata hai).
+In-memory state (resets on restart - the user simply presses the button again).
 """
 
 from pyrogram import filters
 
-# uid -> {"kind": "artist", ...}   (user se abhi kaunsa input maanga ja raha hai)
+# uid -> {"kind": "artist", ...}   (which input is currently being asked from the user)
 INPUT = {}
 
 # uid -> {"items": [{"chat_id","msg_id","name","duration","size"}], "panel_id": int, "chat_id": int}
 MERGE = {}
 
-# uid -> {"done": int, "total": int}  (/status me Batch Mode ke liye)
+# uid -> {"done": int, "total": int}  (for Batch Mode in /status)
 BATCH = {}
 
-# uid -> (chat_id, message_id, is_photo)  (latest main panel jisko refresh karna hai)
+# uid -> (chat_id, message_id, is_photo)  (latest main panel that needs to be refreshed)
 PANEL = {}
 
 
@@ -30,7 +30,7 @@ def pop_input(uid):
 
 
 def clear_user_state(uid):
-    """Pending input, merge list aur batch-wait sab saaf."""
+    """Clear pending input, merge list and batch-wait."""
     INPUT.pop(uid, None)
     MERGE.pop(uid, None)
 
@@ -40,7 +40,7 @@ async def _has_input(_, __, message):
     if not u or u.id not in INPUT:
         return False
     try:
-        from plugins.session import LOGIN_STATE  # login chal raha ho to router ko mat chhedo
+        from plugins.session import LOGIN_STATE  # if login is in progress, do not disturb the router
         return u.id not in LOGIN_STATE
     except Exception:
         return True

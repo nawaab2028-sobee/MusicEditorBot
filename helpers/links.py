@@ -1,10 +1,10 @@
 """
-Telegram post link parser (Save Restricted bot wala logic).
+Telegram post link parser (same logic as the Save Restricted bot).
 
 Supported:
   https://t.me/channel/123            -> public, single
   https://t.me/channel/100-110        -> public, range   ("Channel/starting-ending")
-  https://t.me/c/1234567890/123       -> private (login chahiye)
+  https://t.me/c/1234567890/123       -> private (login required)
   https://t.me/c/1234567890/100-110   -> private range
   https://t.me/c/1234567890/5/123     -> private forum/topic link
 """
@@ -20,7 +20,7 @@ def parse_telegram_link(text):
     Returns (kind, target, from_id, to_id)
       kind   : "private" | "public" | None
       target : int chat_id (-100...) for private, str username for public
-    Link na mile to (None, None, None, None).
+    If no link is found: (None, None, None, None).
     """
     if not text:
         return None, None, None, None

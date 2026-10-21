@@ -1,5 +1,5 @@
 """
-Shared actions jo kai plugins use karte hain:
+Shared actions used by several plugins:
   limit message, direct audio queue, batch start, merge panel + merge job.
 """
 
@@ -38,7 +38,7 @@ async def limit_text(uid):
         r = to_ist(reset)
         if r:
             text += f"\n🔄 Limit resets at: <code>{r.strftime('%d %b, %I:%M %p')} IST</code>\n"
-    text += "\n💎 <b>Premium</b> lo aur unlimited audio edit karo — /myplan"
+    text += "\n💎 Get <b>Premium</b> and edit unlimited audios — /myplan"
     return text
 
 
@@ -46,7 +46,7 @@ LIMIT_ROWS = [[("💎 Upgrade to Premium", "premium_plans_btn", "success")]]
 
 
 async def allowance_left(uid):
-    """None = unlimited, warna queue/processing hataa kar bacha hua allowance."""
+    """None = unlimited, otherwise the remaining allowance after subtracting queued/processing audios."""
     rem = await db.remaining_allowance(uid)
     if rem is None:
         return None
@@ -71,7 +71,7 @@ async def queue_direct_audio(client, message):
 
     ahead = queue_position(uid)
     status = await message.reply_text(
-        f"⏳ <b>Queued</b> (#{ahead + 1}) — pehle wali audio complete hone ke baad start hogi." if ahead
+        f"⏳ <b>Queued</b> (#{ahead + 1}) — will start after the previous audio is complete." if ahead
         else "📥 <b>Starting...</b>",
         quote=True, parse_mode=enums.ParseMode.HTML,
     )
@@ -89,9 +89,9 @@ async def queue_direct_audio(client, message):
             if res.get("target_error"):
                 await client.send_message(
                     chat_id,
-                    "⚠️ <b>Target channel me audio nahi bhej paya.</b>\n"
+                    "⚠️ <b>Could not send the audio to the target channel.</b>\n"
                     f"<code>{esc(res['target_error'])}</code>\n"
-                    "Bot channel me admin hai? /status me Target Channel check karo.",
+                    "Is the bot an admin in the channel? Check the Target Channel in /status.",
                     parse_mode=enums.ParseMode.HTML,
                 )
         except asyncio.CancelledError:
@@ -104,7 +104,7 @@ async def queue_direct_audio(client, message):
             await set_status(client, chat_id, status.id, f"❌ <b>Failed:</b> <code>{esc(str(e)[:300])}</code>")
 
     async def dropped():
-        await set_status(client, chat_id, status.id, "🛑 <b>Queue se hata diya gaya.</b>")
+        await set_status(client, chat_id, status.id, "🛑 <b>Removed from the queue.</b>")
 
     await enqueue(uid, Job(run, weight=1, kind="audio", on_dropped=dropped))
 
@@ -114,14 +114,14 @@ async def queue_direct_audio(client, message):
 # ======================================================
 
 async def start_batch(client, message, uid, kind, target, a, b):
-    """Batch job queue me daalo. a..b = post id range."""
+    """Add a batch job to the queue. a..b = post id range."""
     chat_id = message.chat.id
     left = await allowance_left(uid)
     if left is not None and left <= 0:
         return await send_limit(client, uid, chat_id, reply_to=message.id)
 
     count = min(b - a + 1, BATCH_MAX_MESSAGES)
-    note = f"\n<i>(Max {BATCH_MAX_MESSAGES} posts ek batch me)</i>" if (b - a + 1) > BATCH_MAX_MESSAGES else ""
+    note = f"\n<i>(Max {BATCH_MAX_MESSAGES} posts per batch)</i>" if (b - a + 1) > BATCH_MAX_MESSAGES else ""
     ahead = queue_position(uid)
     status = await message.reply_text(
         f"📁 <b>Batch {'queued' if ahead else 'starting'}</b>\nPosts: <b>{count}</b> ({a}-{a + count - 1}){note}",
@@ -134,7 +134,7 @@ async def start_batch(client, message, uid, kind, target, a, b):
         await pipeline.run_batch(client, uid, chat_id, status.id, kind, target, a, a + count - 1)
 
     async def dropped():
-        await set_status(client, chat_id, status.id, "🛑 <b>Batch queue se hata diya gaya.</b>")
+        await set_status(client, chat_id, status.id, "🛑 <b>Batch removed from the queue.</b>")
 
     await enqueue(uid, Job(run, weight=weight if left is not None else 0, kind="batch", on_dropped=dropped))
 
@@ -148,20 +148,20 @@ def merge_text(uid):
     lines = [
         "🔗 <b>Merge Mode</b>",
         "",
-        f"Jin audios ko merge karna hai wo ek ke baad ek bhejo (min 2, max {MERGE_MAX_FILES}).",
-        "Merge order = jis order me bhejoge.",
+        f"Send the audios you want to merge one after another (min 2, max {MERGE_MAX_FILES}).",
+        "Merge order = the order in which you send them.",
         "",
         f"📋 <b>Queue ({len(items)}):</b>",
     ]
     if not items:
-        lines.append("<i>Abhi koi audio nahi.</i>")
+        lines.append("<i>No audio yet.</i>")
     shown = items[-15:]
     start = len(items) - len(shown)
     if start:
-        lines.append(f"<i>... {start} pehle wali</i>")
+        lines.append(f"<i>... {start} earlier</i>")
     for k, it in enumerate(shown, start + 1):
         lines.append(f"{k}. {esc(it['name'][:45])} ({fmt_duration(it['duration'])})")
-    lines += ["", "Ready ho to <b>Merge Now</b> dabao."]
+    lines += ["", "When ready, press <b>Merge Now</b>."]
     return "\n".join(lines)
 
 
@@ -176,7 +176,7 @@ _merge_tasks = {}
 
 
 async def _merge_refresh(client, uid):
-    await asyncio.sleep(1.2)  # quick-fire uploads ko ek edit me jodo
+    await asyncio.sleep(1.2)  # combine quick-fire uploads into a single edit
     st = MERGE.get(uid)
     if not st or not st.get("panel_id"):
         return
@@ -194,7 +194,7 @@ async def add_merge_item(client, message, mediaobj):
     uid = message.from_user.id
     st = MERGE[uid]
     if len(st["items"]) >= MERGE_MAX_FILES:
-        return await message.reply_text(f"⚠️ Max {MERGE_MAX_FILES} audios hi merge ho sakti hain. <b>Merge Now</b> dabao.",
+        return await message.reply_text(f"⚠️ Only {MERGE_MAX_FILES} audios can be merged at most. Press <b>Merge Now</b>.",
                                         parse_mode=enums.ParseMode.HTML)
     st["items"].append({
         "msg_id": message.id,
@@ -205,7 +205,7 @@ async def add_merge_item(client, message, mediaobj):
 
 
 async def start_merge(client, uid, chat_id, panel_msg_id):
-    """Merge job queue me daalo (items copy karke MERGE state hata do)."""
+    """Add the merge job to the queue (copy the items and then clear the MERGE state)."""
     st = MERGE.pop(uid)
     items = list(st["items"])
     n = len(items)
@@ -224,7 +224,7 @@ async def start_merge(client, uid, chat_id, panel_msg_id):
                 pass
             if res.get("target_error"):
                 await client.send_message(
-                    chat_id, f"⚠️ <b>Target channel me nahi bhej paya.</b>\n<code>{esc(res['target_error'])}</code>",
+                    chat_id, f"⚠️ <b>Could not send to the target channel.</b>\n<code>{esc(res['target_error'])}</code>",
                     parse_mode=enums.ParseMode.HTML,
                 )
         except asyncio.CancelledError:
@@ -237,6 +237,6 @@ async def start_merge(client, uid, chat_id, panel_msg_id):
             await set_status(client, chat_id, panel_msg_id, f"❌ <b>Merge failed:</b> <code>{esc(str(e)[:300])}</code>")
 
     async def dropped():
-        await set_status(client, chat_id, panel_msg_id, "🛑 <b>Merge queue se hata diya gaya.</b>")
+        await set_status(client, chat_id, panel_msg_id, "🛑 <b>Merge removed from the queue.</b>")
 
     await enqueue(uid, Job(run, weight=n, kind="merge", on_dropped=dropped))

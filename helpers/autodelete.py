@@ -1,5 +1,5 @@
 """
-Auto-delete scheduler. Entries MongoDB me bhi save hoti hain, isliye bot restart ho to bhi delete hota rehta hai.
+Auto-delete scheduler. Entries are also saved in MongoDB, so deletion continues even after a bot restart.
 """
 
 import asyncio
@@ -14,7 +14,7 @@ logger = LOGGER(__name__)
 
 
 async def schedule_delete(client, chat_id, ids, delay):
-    """delay = seconds. 0 = abhi delete."""
+    """delay = seconds. 0 = delete immediately."""
     ids = [int(i) for i in ids if i]
     if not ids:
         return
@@ -28,7 +28,7 @@ async def schedule_delete(client, chat_id, ids, delay):
 
 
 async def autodelete_loop(client):
-    """Har 10 sec me due messages delete karta hai."""
+    """Deletes due messages every 10 seconds."""
     await db.load_pending_deletes()
     while True:
         try:
@@ -37,7 +37,7 @@ async def autodelete_loop(client):
                     await client.delete_messages(entry["chat_id"], entry["ids"])
                 except FloodWait as e:
                     await asyncio.sleep(e.value)
-                    continue  # agli loop me dobara try
+                    continue  # retry in the next loop
                 except Exception as e:
                     logger.debug(f"auto delete failed {entry['chat_id']}: {e}")
                 await db.finish_delete(entry["_id"])

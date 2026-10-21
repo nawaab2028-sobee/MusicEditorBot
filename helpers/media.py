@@ -1,9 +1,9 @@
 """
 Media helpers: ffprobe / ffmpeg (trim, voice tag, merge, tags, cover) + Pillow (cover resize).
 
-Saara tagging ffmpeg se hota hai (extra library nahi chahiye):
-  * mp3 input + voice tag nahi  -> stream copy (quality loss zero, fast)
-  * baaki sab (non-mp3, voice tag, merge) -> mp3 re-encode (libmp3lame)
+All tagging is done with ffmpeg (no extra library needed):
+  * mp3 input + no voice tag  -> stream copy (zero quality loss, fast)
+  * everything else (non-mp3, voice tag, merge) -> mp3 re-encode (libmp3lame)
 """
 
 import asyncio
@@ -22,7 +22,7 @@ THUMB_MAX_BYTES = 190 * 1024
 
 
 class MediaError(Exception):
-    """ffmpeg / file problem (user ko dikhane layak message)."""
+    """ffmpeg / file problem (message suitable to show to the user)."""
 
 
 # ======================================================
@@ -37,9 +37,9 @@ async def run_cmd(cmd, timeout=3600):
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        raise MediaError("Processing timeout ho gaya.")
+        raise MediaError("Processing timed out.")
     except asyncio.CancelledError:
-        # /stop: ffmpeg process bhi maar do
+        # /stop: kill the ffmpeg process as well
         try:
             proc.kill()
         except Exception:
@@ -55,7 +55,7 @@ async def run_cmd(cmd, timeout=3600):
 async def probe(path):
     """
     Returns dict: duration, title, artist, album, codec, bitrate (kbps), has_cover, is_mp3
-    Audio nahi ho / corrupt ho to MediaError.
+    Raises MediaError if it is not audio / is corrupt.
     """
     try:
         rc, out, err = await run_cmd(
@@ -63,18 +63,18 @@ async def probe(path):
             timeout=120,
         )
     except FileNotFoundError:
-        raise MediaError("ffmpeg install nahi hai (ffprobe not found).")
+        raise MediaError("ffmpeg is not installed (ffprobe not found).")
     if rc != 0:
-        raise MediaError("Yeh valid audio file nahi hai.")
+        raise MediaError("This is not a valid audio file.")
     try:
         data = json.loads(out)
     except Exception:
-        raise MediaError("Yeh valid audio file nahi hai.")
+        raise MediaError("This is not a valid audio file.")
 
     streams = data.get("streams", [])
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     if audio is None:
-        raise MediaError("Is file me audio stream nahi mila.")
+        raise MediaError("No audio stream found in this file.")
     fmt = data.get("format", {}) or {}
 
     tags = {}
@@ -108,7 +108,7 @@ async def probe(path):
 
 
 def pick_bitrate(kbps):
-    """Source bitrate ke hisaab se output mp3 bitrate (128..320k)."""
+    """Output mp3 bitrate based on the source bitrate (128..320k)."""
     if not kbps or kbps <= 0:
         return 192
     for step in (128, 160, 192, 224, 256, 320):
@@ -122,7 +122,7 @@ def pick_bitrate(kbps):
 # ======================================================
 
 async def extract_cover(path, out_jpg):
-    """Audio ke andar ka original cover nikalo. True = mil gaya."""
+    """Extract the original cover from inside the audio. True = found."""
     try:
         rc, _, _ = await run_cmd(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
@@ -161,7 +161,7 @@ def _make_cover_sync(src, cover_out, thumb_out):
         except Exception:
             pass
         img = _flatten(im)
-    # "Auto fit": kisi bhi size/format ki image -> square cover (center crop)
+    # "Auto fit": image of any size/format -> square cover (center crop)
     square = ImageOps.fit(img, (COVER_SIZE, COVER_SIZE), Image.LANCZOS)
     _save_jpeg_limited(square, cover_out)
     thumb = ImageOps.fit(img, (THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
@@ -176,16 +176,16 @@ def _make_thumb_sync(src, thumb_out):
 
 
 async def make_custom_cover(src, cover_out, thumb_out):
-    """User ki bheji image -> square cover + Telegram thumb. Image galat ho to MediaError."""
+    """Image sent by the user -> square cover + Telegram thumb. Raises MediaError if the image is invalid."""
     try:
         await asyncio.to_thread(_make_cover_sync, src, cover_out, thumb_out)
     except Exception as e:
         logger.warning(f"cover process failed: {e}")
-        raise MediaError("Yeh valid image nahi hai. Photo ya image file bhejo.")
+        raise MediaError("This is not a valid image. Please send a photo or an image file.")
 
 
 async def make_thumb(src, thumb_out):
-    """Original cover (aspect ratio same) -> Telegram thumb. False = fail."""
+    """Original cover (same aspect ratio) -> Telegram thumb. False = failed."""
     try:
         await asyncio.to_thread(_make_thumb_sync, src, thumb_out)
         return True
@@ -218,15 +218,15 @@ async def render_audio(
 ):
     """
     inputs      : [path, ...]  (1 file = edit, 2+ = merge)
-    trim_start  : seconds (sirf single input)
-    trim_end    : seconds, absolute end time (sirf single input)
-    voice_tag   : path ya None -> song ke START me judta hai
-    cover       : jpg path ya None (None = koi cover nahi)
-    title/artist: None = original tag rehne do
+    trim_start  : seconds (single input only)
+    trim_end    : seconds, absolute end time (single input only)
+    voice_tag   : path or None -> added at the START of the song
+    cover       : jpg path or None (None = no cover)
+    title/artist: None = keep the original tag
     copy_ok     : True = stream copy (mp3, no voice tag, single input)
     """
     if not inputs:
-        raise MediaError("Koi input file nahi.")
+        raise MediaError("No input file.")
     single = len(inputs) == 1
     if not single:
         trim_start = trim_end = None
@@ -298,8 +298,8 @@ async def render_audio(
     try:
         rc, _, err = await run_cmd(cmd)
     except FileNotFoundError:
-        raise MediaError("ffmpeg install nahi hai.")
+        raise MediaError("ffmpeg is not installed.")
     if rc != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
         logger.error(f"ffmpeg failed: {_tail(err, 1500)}")
-        raise MediaError(f"Audio process nahi ho paya: {_tail(err, 200)}")
+        raise MediaError(f"Could not process the audio: {_tail(err, 200)}")
     return out_path

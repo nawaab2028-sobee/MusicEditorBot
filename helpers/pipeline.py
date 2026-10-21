@@ -3,7 +3,7 @@ Core processing pipeline:
   download -> probe -> (trim / voice tag / convert / tags / cover via ffmpeg) -> resend
   -> target channel copy -> auto delete -> counters
 
-Direct audio, Batch (public + private/login) aur Merge teeno yahi use karte hain.
+Direct audio, Batch (public + private/login) and Merge all use this.
 """
 
 import asyncio
@@ -29,7 +29,7 @@ logger = LOGGER(__name__)
 
 
 class UserError(Exception):
-    """User ko seedha dikhane wala error message."""
+    """Error message shown directly to the user."""
 
 
 # ======================================================
@@ -37,7 +37,7 @@ class UserError(Exception):
 # ======================================================
 
 def get_audio_media(m):
-    """Message me audio (audio ya audio-type document) ho to uska media object, warna None."""
+    """If the message has audio (audio or an audio-type document), returns its media object, otherwise None."""
     if m is None or getattr(m, "empty", False):
         return None
     if getattr(m, "audio", None):
@@ -50,10 +50,10 @@ def get_audio_media(m):
 
 def compute_trim(duration, start_trim, end_trim):
     """
-    Returns (trim_start|None, trim_end|None). Invalid combo par UserError.
-      start_trim : seconds (audio yaha se shuru)
+    Returns (trim_start|None, trim_end|None). Raises UserError for an invalid combination.
+      start_trim : seconds (audio starts from here)
       end_trim   : {"mode": "last"|"at", "sec": N}
-        last -> aakhri N sec hata do   |   at -> N sec par audio khatam
+        last -> remove the last N sec   |   at -> audio ends at N sec
     """
     ts = float(start_trim or 0)
     te = float(duration)
@@ -63,8 +63,8 @@ def compute_trim(duration, start_trim, end_trim):
     te = min(te, duration)
     if te - ts < 0.5:
         raise UserError(
-            f"Trim settings is audio ({fmt_duration(duration)}) par fit nahi hoti "
-            f"(start: {fmt_trim(ts)}, end: {fmt_trim(max(te, 0))}). /status me trim check karke change karo."
+            f"Trim settings do not fit this audio ({fmt_duration(duration)}) "
+            f"(start: {fmt_trim(ts)}, end: {fmt_trim(max(te, 0))}). Check the trim in /status and change it."
         )
     return (ts if ts > 0.01 else None), (te if te < duration - 0.05 else None)
 
@@ -116,7 +116,7 @@ def make_progress(client, chat_id, status_id, label):
 # ======================================================
 
 async def ensure_custom_cover(client, uid, doc):
-    """Returns (cover_path, thumb_path) ya (None, None). Cache missing ho to Telegram se dobara download."""
+    """Returns (cover_path, thumb_path) or (None, None). If the cache is missing, it is downloaded again from Telegram."""
     fid, uniq = doc.get("cover_file_id"), doc.get("cover_unique") or "x"
     if not fid:
         return None, None
@@ -140,7 +140,7 @@ async def ensure_custom_cover(client, uid, doc):
 
 
 async def ensure_voice(client, uid, doc):
-    """Voice tag ki local file (cache). Returns path ya None."""
+    """Local file of the voice tag (cache). Returns path or None."""
     fid, uniq = doc.get("voice_file_id"), doc.get("voice_unique") or "x"
     if not fid:
         return None
@@ -159,7 +159,7 @@ async def ensure_voice(client, uid, doc):
 
 
 def drop_cached(uid, kind, keep=()):
-    """Purani cache files hata do (kind: cover | voice). keep = in file names ko mat hatao."""
+    """Remove old cache files (kind: cover | voice). keep = do not remove these file names."""
     folder = COVER_DIR if kind == "cover" else VOICE_DIR
     try:
         for f in os.listdir(folder):
@@ -175,10 +175,10 @@ def drop_cached(uid, kind, keep=()):
 
 async def prepare_cover(client, downloader, uid, doc, src_path, info, mediaobj, workdir):
     """
-    cover_mode ke hisaab se (cover_path_to_embed, thumb_path).
-      original -> audio ka apna cover (hamesha re-attach)
-      custom   -> user ka cover
-      none     -> koi cover nahi
+    Based on cover_mode: (cover_path_to_embed, thumb_path).
+      original -> the audio's own cover (always re-attached)
+      custom   -> the user's cover
+      none     -> no cover
     """
     mode = doc.get("cover_mode", "original")
     cover = thumb = None
@@ -188,7 +188,7 @@ async def prepare_cover(client, downloader, uid, doc, src_path, info, mediaobj, 
         cover, thumb = await ensure_custom_cover(client, uid, doc)
         if cover:
             return cover, thumb
-        # custom cover restore nahi hua -> original par fallback
+        # custom cover could not be restored -> fall back to original
     if info and info.get("has_cover"):
         ex = os.path.join(workdir, "orig_cover.jpg")
         if await media.extract_cover(src_path, ex):
@@ -223,7 +223,7 @@ async def _flood_retry(factory, tries=3):
 
 
 async def deliver(client, doc, chat_id, out_path, *, title, artist, duration, thumb, file_name, status_id, label, fallback_name):
-    """Final audio user ko bhejo + target channel copy + auto delete. Returns (sent_msg, target_error|None)."""
+    """Send the final audio to the user + copy to target channel + auto delete. Returns (sent_msg, target_error|None)."""
     size = os.path.getsize(out_path)
     caption = build_caption(title, artist, duration, size, fallback_name) if doc.get("caption_on", True) else ""
     prog = make_progress(client, chat_id, status_id, f"⬆️ Uploading... {label}")
@@ -255,12 +255,12 @@ async def deliver(client, doc, chat_id, out_path, *, title, artist, duration, th
 
 async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id, input_msg_id=None, prefix=""):
     """
-    Ek audio message ko poora process karke user ko bhejo.
-    Returns dict(name, target_error). Error par UserError / MediaError.
+    Fully process one audio message and send it to the user.
+    Returns dict(name, target_error). Raises UserError / MediaError on error.
     """
     mediaobj = get_audio_media(src_msg)
     if mediaobj is None:
-        raise UserError("Is message me audio nahi hai.")
+        raise UserError("There is no audio in this message.")
 
     doc = dict(await db.get_user(uid))  # settings snapshot
     orig_name = getattr(mediaobj, "file_name", None) or f"audio_{src_msg.id}.mp3"
@@ -276,7 +276,7 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
             progress=make_progress(client, chat_id, status_id, f"{prefix}⬇️ Downloading... {short}"),
         )
         if not path or not os.path.exists(path):
-            raise UserError("Download fail ho gaya.")
+            raise UserError("Download failed.")
 
         # 2. probe
         await set_status(client, chat_id, status_id, f"{prefix}⚙️ Processing... <b>{short}</b>")
@@ -331,7 +331,7 @@ async def open_session(uid):
     if not sess:
         raise UserError(
             "🔒 <b>Authentication Required</b>\n\n"
-            "Is content ke liye login chahiye. /login se apna account connect karo."
+            "Login is required for this content. Connect your account using /login."
         )
     acc = Client(
         f"audioed_{uid}", session_string=sess, api_id=API_ID, api_hash=API_HASH,
@@ -340,12 +340,12 @@ async def open_session(uid):
     try:
         await acc.connect()
     except Exception as e:
-        raise UserError(f"❌ <b>Authentication Failed</b>\n\nSession expire ho sakta hai. /logout karke /login karo.\n<code>{esc(e)}</code>")
+        raise UserError(f"❌ <b>Authentication Failed</b>\n\nThe session may have expired. Use /logout and then /login again.\n<code>{esc(e)}</code>")
     return acc
 
 
 class Fetcher:
-    """Channel posts laata hai: pehle bot se (public), warna user ke login session se."""
+    """Fetches channel posts: first via the bot (public), otherwise via the user's login session."""
 
     def __init__(self, client, uid):
         self.client, self.uid, self.acc = client, uid, None
@@ -368,10 +368,10 @@ class Fetcher:
                 logger.debug(f"bot fetch failed for {target}: {e}")
             if not await db.get_session(self.uid):
                 if bot_msgs is not None:
-                    return bot_msgs, self.client  # sab messages deleted/empty hi honge
+                    return bot_msgs, self.client  # all messages must be deleted/empty
                 raise UserError(
                     "🔒 <b>Authentication Required</b>\n\n"
-                    "Yeh channel bot se access nahi ho raha. /login se apna account connect karo."
+                    "This channel cannot be accessed by the bot. Connect your account using /login."
                 )
         acc = await self._session()
         try:
@@ -383,7 +383,7 @@ class Fetcher:
             except Exception as e2:
                 raise UserError(
                     "❌ <b>Unable to Fetch Messages</b>\n\n"
-                    "Check karo ki logged-in account us channel/group ka member hai aur link sahi hai.\n"
+                    "Check that the logged-in account is a member of that channel/group and that the link is correct.\n"
                     f"<code>{esc(e2)}</code>"
                 )
         return (res if isinstance(res, list) else [res]), acc
@@ -398,7 +398,7 @@ class Fetcher:
 
 
 async def validate_first_link(client, uid, kind, target, msg_id):
-    """Batch ke pehle link me audio hai? Returns True/False (error par UserError)."""
+    """Does the first link of the batch contain audio? Returns True/False (raises UserError on error)."""
     f = Fetcher(client, uid)
     try:
         msgs, _ = await f.get(kind, target, [msg_id])
@@ -456,14 +456,14 @@ async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_i
         await fetcher.close()
         head = {
             "stopped": "🛑 <b>Batch Stopped</b>",
-            "limit": "❌ <b>Daily limit reached - batch roka gaya</b>",
+            "limit": "❌ <b>Daily limit reached - batch stopped</b>",
             "error": "❌ <b>Batch Failed</b>",
         }.get(reason, "✅ <b>Batch Complete</b>")
         lines = [head, "", f"✅ Done: <b>{done}</b>", f"⏭ Skipped (no audio): <b>{skipped}</b>", f"❌ Failed: <b>{failed}</b>"]
         if errors:
             lines += ["", "<b>Errors:</b>"] + [f"• {e if e.startswith('🔒') or e.startswith('❌') else esc(e)}" for e in errors[:5]]
         if reason == "limit":
-            lines += ["", "<i>Premium lo - unlimited batch ke liye /myplan</i>"]
+            lines += ["", "<i>Get Premium for unlimited batch - /myplan</i>"]
         try:
             await client.send_message(chat_id, "\n".join(lines), parse_mode=enums.ParseMode.HTML)
         except Exception:
@@ -479,7 +479,7 @@ async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_i
 # ======================================================
 
 async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
-    """items: [{"msg_id", "name"}] user ke chat me bheji hui audios (send order me)."""
+    """items: [{"msg_id", "name"}] audios sent in the user's chat (in the order they were sent)."""
     doc = dict(await db.get_user(uid))
     n = len(items)
     workdir = os.path.join(DOWNLOAD_DIR, str(uid), "merge_" + uuid.uuid4().hex[:8])
@@ -491,7 +491,7 @@ async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
         for k, m in enumerate(msgs, 1):
             mo = get_audio_media(m)
             if mo is None:
-                continue  # user ne delete kar diya hoga
+                continue  # the user must have deleted it
             first_media = first_media or mo
             label = f"🔗 Merge: {k}/{n}\n"
             nm = esc((getattr(mo, "file_name", None) or "audio")[:50])
@@ -500,11 +500,11 @@ async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
                 progress=make_progress(client, chat_id, status_id, f"{label}⬇️ Downloading... {nm}"),
             )
             if not p:
-                raise UserError(f"{nm} download nahi hua.")
+                raise UserError(f"{nm} could not be downloaded.")
             paths.append(p)
             infos.append(await media.probe(p))
         if len(paths) < 2:
-            raise UserError("Merge ke liye kam se kam 2 valid audio chahiye.")
+            raise UserError("At least 2 valid audios are required for merge.")
 
         await set_status(client, chat_id, status_id, f"🔗 Merging {len(paths)} audios... ⚙️")
         first = infos[0]
