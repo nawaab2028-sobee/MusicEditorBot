@@ -1,9 +1,9 @@
 """
 Database layer.
 
-* MongoDB (motor) = main storage  (Save Restricted bot jaisa system, collection: users)
-* Local JSON mirror (data/users.json) = backup; Mongo down ho to settings yaha se load hoti hain
-* In-memory cache = har button press par DB roundtrip nahi
+* MongoDB (motor) = main storage  (same system as the Save Restricted bot, collection: users)
+* Local JSON mirror (data/users.json) = backup; if Mongo is down, settings are loaded from here
+* In-memory cache = no DB roundtrip on every button press
 """
 
 import asyncio
@@ -23,22 +23,22 @@ logger = LOGGER(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Settings ke default values (user doc me key na ho to yeh use hote hain)
+# Default values of settings (used when the key is not present in the user doc)
 DEFAULTS = {
     "caption_on": True,
     "cover_mode": "original",  # original | custom | none
 }
 
-# JSON mirror me yeh keys nahi jaati (sensitive)
+# These keys are not written to the JSON mirror (sensitive)
 _JSON_SKIP = {"session", "_id"}
 
 
 # ======================================================
-# Time helpers (premium.py wale logic se same)
+# Time helpers (same logic as premium.py)
 # ======================================================
 
 def to_dt(value):
-    """str / date / datetime -> naive datetime (server clock). Bekaar value par None."""
+    """str / date / datetime -> naive datetime (server clock). None for an invalid value."""
     if value is None or value == "":
         return None
     try:
@@ -57,7 +57,7 @@ def to_dt(value):
 
 
 def to_ist(value):
-    """Stored expiry/start -> aware datetime (IST). date / 'YYYY-MM-DD' = us din ke end tak valid."""
+    """Stored expiry/start -> aware datetime (IST). date / 'YYYY-MM-DD' = valid until the end of that day."""
     if value is None or value == "":
         return None
     try:
@@ -90,7 +90,7 @@ class Database:
         self.dcol = self.db.scheduled_deletes
 
         self.cache = {}          # uid -> user doc
-        self._json = {}          # uid(str) -> doc (file se)
+        self._json = {}          # uid(str) -> doc (from file)
         self._mem_deletes = {}   # _id -> {"_id","chat_id","ids","due"}
         self._flush_task = None
         self.mongo_ok = True
@@ -176,7 +176,7 @@ class Database:
         )
 
     async def ensure_user(self, uid, name=""):
-        """User ko load/create karo. Returns (doc, created)."""
+        """Load/create the user. Returns (doc, created)."""
         uid = int(uid)
         if uid in self.cache:
             return self.cache[uid], False
@@ -185,7 +185,7 @@ class Database:
             doc.pop("_id", None)
             self.cache[uid] = doc
             return doc, False
-        # Mongo me nahi mila -> JSON mirror check (Mongo down hone par kaam aata hai)
+        # Not found in Mongo -> check the JSON mirror (useful when Mongo is down)
         if not self.mongo_ok and str(uid) in self._json:
             doc = dict(self._json[str(uid)])
             doc.setdefault("session", None)
@@ -269,10 +269,10 @@ class Database:
         return bool(doc.get("is_banned", False))
 
     # --------------------------------------------------
-    # Premium / Auth  (Save Restricted bot wala system)
+    # Premium / Auth  (Save Restricted bot system)
     # --------------------------------------------------
     async def add_premium(self, uid, expiry_date):
-        """expiry_date: 'YYYY-MM-DD' string ya None (= permanent)."""
+        """expiry_date: 'YYYY-MM-DD' string or None (= permanent)."""
         await self.update_user(
             uid,
             is_premium=True,
@@ -304,7 +304,7 @@ class Database:
 
     @staticmethod
     def premium_active(doc):
-        """Paid premium abhi valid hai? (expiry check ke saath)"""
+        """Is paid premium currently valid? (with expiry check)"""
         if not doc.get("is_premium"):
             return False
         raw = doc.get("premium_expiry")
@@ -324,7 +324,7 @@ class Database:
         return bool(end and end > datetime.datetime.now(IST))
 
     async def has_unlimited_access(self, uid):
-        """Owner / active premium / active auth = koi limit nahi."""
+        """Owner / active premium / active auth = no limit."""
         if int(uid) == OWNER_ID:
             return True
         doc = await self.get_user(uid)
@@ -334,7 +334,7 @@ class Database:
     # Daily limit (free user = FREE_DAILY_LIMIT audio / 24h)
     # --------------------------------------------------
     async def get_usage(self, uid):
-        """Returns (used, reset_dt). Window khatam ho gayi ho to usage 0 kar deta hai."""
+        """Returns (used, reset_dt). Resets usage to 0 if the window has ended."""
         doc = await self.get_user(uid)
         reset = to_dt(doc.get("limit_reset_time"))
         if reset is not None and datetime.datetime.now() >= reset:
@@ -343,14 +343,14 @@ class Database:
         return int(doc.get("daily_usage", 0) or 0), reset
 
     async def remaining_allowance(self, uid):
-        """None = unlimited, warna aaj kitni audio aur ho sakti hain."""
+        """None = unlimited, otherwise how many more audios are allowed today."""
         if await self.has_unlimited_access(uid):
             return None
         used, _ = await self.get_usage(uid)
         return max(0, FREE_DAILY_LIMIT - used)
 
     async def add_traffic(self, uid, n=1):
-        """n audio process hui -> usage badhao. Pehli usage par 24h ka timer start."""
+        """n audios processed -> increase usage. The 24h timer starts on the first usage."""
         doc = await self.get_user(uid)
         total = int(doc.get("total_saves", 0) or 0) + n
         if await self.has_unlimited_access(uid):
@@ -370,7 +370,7 @@ class Database:
             await self.update_user(uid, title_n=int(doc["title_n"]) + 1)
 
     # --------------------------------------------------
-    # Scheduled deletes (auto delete) - restart ke baad bhi chalte hain
+    # Scheduled deletes (auto delete) - continue to work even after a restart
     # --------------------------------------------------
     async def add_delete(self, chat_id, ids, due_ts):
         entry = {"_id": uuid.uuid4().hex, "chat_id": int(chat_id), "ids": [int(i) for i in ids], "due": float(due_ts)}
