@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# ffmpeg = trim / merge / voice-tag ke liye zaroori
+# ffmpeg = required for trim / merge / voice-tag
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*

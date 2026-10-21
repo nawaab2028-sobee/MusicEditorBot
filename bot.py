@@ -45,7 +45,7 @@ class Bot(Client):
         for d in (DATA_DIR, COVER_DIR, VOICE_DIR, DOWNLOAD_DIR):
             os.makedirs(d, exist_ok=True)
 
-        # 1. Keep-alive pehle (Render port detect kare)
+        # 1. Keep-alive first (so that Render can detect the port)
         if keep_alive and not self._keep_alive_started:
             try:
                 keep_alive()

@@ -1,5 +1,5 @@
 """
-Keep-alive HTTP server (Flask) - Render / Docker ke liye.
+Keep-alive HTTP server (Flask) - for Render / Docker.
 Default port 8000 (config.PORT / ENV PORT).
 """
 
