@@ -22,9 +22,9 @@ def _bool(name: str, default: str) -> bool:
 # Telegram Bot Credentials
 # ==============================
 
-BOT_TOKEN = _get("BOT_TOKEN", "8371349393:AAF9LVAwBaUIUTCLrIV62PnjhdZBTqdO43I")
-API_ID = int(_get("API_ID", "22518279"))
-API_HASH = _get("API_HASH", "61e5cc94bc5e6318643707054e54caf4")
+BOT_TOKEN = _get("BOT_TOKEN", "8371349393:AAGUP1TTH4B4RbDLI7Cjv4bVXAUBl_7mTMg")
+API_ID = int(_get("API_ID", "38498066"))
+API_HASH = _get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
 
 # ==============================
 # Owner
@@ -39,7 +39,7 @@ OWNER_ID = int(_get("OWNER_ID", "8909902924"))
 
 DB_URI = _get(
     "DB_URI",
-    "mongodb+srv://powerofsensei618_db_user:LuRAYxYPsif5ndvK@cluster0.rizt0nu.mongodb.net/?appName=Cluster0",
+    "mongodb+srv://mdinabano189_db_user:OExxVWuoNAHuBlFr@cluster0.yzkibwa.mongodb.net/?appName=Cluster0",
 )
 # NOTE: Alag DB name taaki Save-Restricted bot ke limits/usage se mix na ho.
 # Premium dono bots me share karna ho to DB_NAME env me "SaveRestricted2" daal do.
@@ -53,7 +53,7 @@ USERS_JSON = os.path.join(DATA_DIR, "users.json")
 # Logging
 # ==============================
 
-LOG_CHANNEL = int(_get("LOG_CHANNEL", "-1004441195247"))
+LOG_CHANNEL = int(_get("LOG_CHANNEL", "-1003781244625"))
 
 # ==============================
 # Web server (Flask keep-alive) - Docker/Render port
