@@ -1,85 +1,159 @@
+import asyncio
+import datetime
 import os
-import io
+from datetime import timezone, timedelta
+
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyromod import listen
-from PIL import Image
-from music_tag import load_file
+from pyrogram.errors import FloodWait
+from pyrogram.types import BotCommand, Message
+
+from config import API_HASH, API_ID, BOT_TOKEN, COVER_DIR, DATA_DIR, DOWNLOAD_DIR, LOG_CHANNEL, OWNER_ID, VOICE_DIR
+from database.db import db
+from helpers.autodelete import autodelete_loop
+from logger import LOGGER
+
+# Keep-alive Flask server (Render / Docker, port 8000)
+try:
+    from keep_alive import keep_alive
+except ImportError:
+    keep_alive = None
+
+logger = LOGGER(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+USER_CACHE = set()
 
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-API_ID = os.environ.get("API_ID")
-API_HASH = os.environ.get("API_HASH")
+class Bot(Client):
+    def __init__(self):
+        super().__init__(
+            name="AudioEditorBot",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            bot_token=BOT_TOKEN,
+            plugins=dict(root="plugins"),
+            workers=16,
+            sleep_threshold=15,
+            max_concurrent_transmissions=5,
+            ipv6=False,
+            in_memory=False,
+        )
+        self._keep_alive_started = False
+        self._bg_tasks = []
 
-Bot = Client(
-    "MusicEditorBot",
-    bot_token = BOT_TOKEN,
-    api_id = API_ID,
-    api_hash = API_HASH
-)
+    async def start(self):
+        for d in (DATA_DIR, COVER_DIR, VOICE_DIR, DOWNLOAD_DIR):
+            os.makedirs(d, exist_ok=True)
 
-START_TXT = """
-Hi {}, I am Music Editor Bot.
-I can change the music tags and artwork.
+        # 1. Keep-alive pehle (Render port detect kare)
+        if keep_alive and not self._keep_alive_started:
+            try:
+                keep_alive()
+                self._keep_alive_started = True
+                logger.info("Keep-alive server started.")
+            except Exception as e:
+                logger.warning(f"Keep-alive failed: {e}")
 
-Send a music to get started.
-"""
+        # 2. FloodWait-safe login loop
+        while True:
+            try:
+                await super().start()
+                break
+            except FloodWait as e:
+                wait_time = int(e.value) + 10
+                logger.warning(f"FLOOD_WAIT during login. Sleeping {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            except Exception as e:
+                logger.error(f"Critical Startup Error: {e}")
+                await asyncio.sleep(15)
 
-START_BTN = InlineKeyboardMarkup(
-        [[
-        InlineKeyboardButton('Source Code', url='https://github.com/samadii/MusicEditorBot'),
-        ]]
-    )
+        me = await self.get_me()
+
+        # 3. DB
+        mongo = await db.ping()
+        user_count = await db.total_users_count() if mongo else len(db.cache)
+        logger.info(f"MongoDB {'connected' if mongo else 'DOWN (JSON mirror mode)'}: {user_count} users.")
+
+        # 4. Auto-delete scheduler
+        self._bg_tasks.append(asyncio.create_task(autodelete_loop(self)))
+
+        # 5. Startup log
+        now = datetime.datetime.now(IST)
+        text = (
+            "<b><i>🤖 Audio Editor Bot Started ♻️</i></b>\n\n"
+            f"<b>Bot:</b> @{me.username}\n"
+            f"<b>Users:</b> <code>{user_count}</code>\n"
+            f"<b>MongoDB:</b> <code>{'OK' if mongo else 'DOWN'}</code>\n"
+            f"<b>Time:</b> <code>{now.strftime('%I:%M %p')} IST</code>"
+        )
+        try:
+            await self.send_message(LOG_CHANNEL, text)
+        except Exception as e:
+            logger.warning(f"Failed to send startup log: {e}")
+
+        await self.set_bot_commands_list()
+
+    async def stop(self, *args):
+        try:
+            await self.send_message(LOG_CHANNEL, "<b><i>❌ Audio Editor Bot going Offline</i></b>")
+        except Exception:
+            pass
+        for t in self._bg_tasks:
+            t.cancel()
+        try:
+            await db.flush()
+        except Exception:
+            pass
+        await asyncio.shield(super().stop())
+        logger.info("Bot stopped cleanly")
+
+    async def set_bot_commands_list(self):
+        commands = [
+            BotCommand("start", "Start the bot / open panel"),
+            BotCommand("status", "Show your current config"),
+            BotCommand("stop", "Clear queue & stop processing"),
+            BotCommand("myplan", "Check your plan"),
+            BotCommand("help", "How to use"),
+            BotCommand("login", "Login (private channel batch)"),
+            BotCommand("logout", "Logout"),
+            BotCommand("cancel", "Cancel current action"),
+            BotCommand("premium", "Premium info"),
+        ]
+        await self.set_bot_commands(commands)
 
 
-@Bot.on_message(filters.command(["start"]))
-async def start(bot, update):
-    text = START_TXT.format(update.from_user.mention)
-    reply_markup = START_BTN
-    await update.reply_text(
-        text=text,
-        disable_web_page_preview=True,
-        reply_markup=reply_markup
-    )
+BotInstance = Bot()
 
-   
-@Bot.on_message(filters.private & filters.audio)
-async def tag(bot, m):
-    mes = await m.reply("`Downloading...`")
-    await m.download(f"temp/{m.audio.file_name}.mp3")
-    music = load_file(f"temp/{m.audio.file_name}.mp3")
 
-    try:
-        artwork = music['artwork']
-        image_data = artwork.value.data
-        img = Image.open(io.BytesIO(image_data))
-        img.save("temp/artwork.jpg")
-    except ValueError:
-        image_data = None
-
-    await mes.delete()
-    fname = await bot.ask(m.chat.id,'`Send the Filename`', filters=filters.text)
-    title = await bot.ask(m.chat.id,'`Send the Title name`', filters=filters.text)
-    artist = await bot.ask(m.chat.id,'`Send the Artist(s) name`', filters=filters.text)
-    answer = await bot.ask(m.chat.id,'`Send the Artwork or` /skip', filters=filters.photo | filters.text)
-    music.remove_tag('artist')
-    music.remove_tag('title')
-    music['artist'] = artist.text
-    music['title'] = title.text
-
-    if answer.photo:
-        await bot.download_media(message=answer.photo, file_name="temp/artwork.jpg")
-        music.remove_tag('artwork')
-        with open('temp/artwork.jpg', 'rb') as img_in:
-            music['artwork'] = img_in.read()
-    music.save()
-
-    try:
-        await bot.send_audio(chat_id=m.chat.id, file_name=fname.text, performer=artist.text, title=title.text, duration=m.audio.duration, audio=f"temp/{m.audio.file_name}.mp3", thumb='temp/artwork.jpg' if answer.photo or image_data else None)
-    except Exception as e:
-        print(e)
+@BotInstance.on_message(filters.private & filters.incoming, group=-1)
+async def new_user_log(bot: Client, message: Message):
+    user = message.from_user
+    if not user or user.id in USER_CACHE:
         return
-    os.remove(f"temp/{m.audio.file_name}.mp3")
+    _, created = await db.ensure_user(user.id, user.first_name)
+    if created:
+        now = datetime.datetime.now(IST)
+        log_text = (
+            "<b>#NewUser 👤</b>\n"
+            f"<b>User:</b> {user.mention}\n"
+            f"<b>ID:</b> <code>{user.id}</code>\n"
+            f"<b>Time:</b> {now.strftime('%I:%M %p')} IST"
+        )
+        try:
+            await bot.send_message(LOG_CHANNEL, log_text)
+        except Exception:
+            pass
+    USER_CACHE.add(user.id)
 
 
-Bot.run()
+@BotInstance.on_message(filters.command("cmd") & filters.user(OWNER_ID))
+async def update_commands(bot: Client, message: Message):
+    try:
+        await bot.set_bot_commands_list()
+        await message.reply_text("✅ Commands menu updated!")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+
+if __name__ == "__main__":
+    BotInstance.run()

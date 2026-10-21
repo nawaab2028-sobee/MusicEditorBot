@@ -1,5 +1,16 @@
-pyrogram
-tgcrypto
-pyromod==1.4
-music_tag
+# --- Telegram ---
+pyrofork==2.3.45
+TgCrypto
+
+# --- Database ---
+motor
+
+# --- Web / HTTP ---
+Flask>=3.0.0
+requests
+
+# --- Image (cover resize) ---
 Pillow
+
+# --- Admin stats ---
+psutil
