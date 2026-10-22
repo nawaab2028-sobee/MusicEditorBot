@@ -22,7 +22,7 @@ def _bool(name: str, default: str) -> bool:
 # Telegram Bot Credentials
 # ==============================
 
-BOT_TOKEN = _get("BOT_TOKEN", "8371349393:AAGUP1TTH4B4RbDLI7Cjv4bVXAUBl_7mTMg")
+BOT_TOKEN = _get("BOT_TOKEN", "8371349393:AAFHfStj3nkRQT50EkylBQEcUVfMnpjDnBY")
 API_ID = int(_get("API_ID", "38498066"))
 API_HASH = _get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
 
