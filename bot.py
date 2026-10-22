@@ -10,6 +10,7 @@ from pyrogram.types import BotCommand, Message
 from config import API_HASH, API_ID, BOT_TOKEN, COVER_DIR, DATA_DIR, DOWNLOAD_DIR, LOG_CHANNEL, OWNER_ID, VOICE_DIR
 from database.db import db
 from helpers.autodelete import autodelete_loop
+from helpers.fastio import FastClient
 from logger import LOGGER
 
 # Keep-alive Flask server (Render / Docker, port 8000)
@@ -24,7 +25,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 USER_CACHE = set()
 
 
-class Bot(Client):
+class Bot(FastClient):
     def __init__(self):
         super().__init__(
             name="AudioEditorBot",

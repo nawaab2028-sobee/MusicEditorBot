@@ -74,6 +74,15 @@ BATCH_MAX_MESSAGES = int(_get("BATCH_MAX_MESSAGES", "1000"))
 # Max ffmpeg jobs of users running at the same time (to save Render RAM)
 MAX_CONCURRENT_JOBS = int(_get("MAX_CONCURRENT_JOBS", "2"))
 
+# Voice tags: how many a user can keep saved (free / premium) and max insert points in one audio
+VOICE_TAG_FREE_LIMIT = int(_get("VOICE_TAG_FREE_LIMIT", "2"))
+VOICE_TAG_PREMIUM_LIMIT = int(_get("VOICE_TAG_PREMIUM_LIMIT", "50"))
+VOICE_MAX_POSITIONS = int(_get("VOICE_MAX_POSITIONS", "25"))
+
+# Transfer speed: requests kept in flight at once (1 = stock Pyrogram behaviour)
+DOWNLOAD_PARALLEL = int(_get("DOWNLOAD_PARALLEL", "6"))
+UPLOAD_PARALLEL = int(_get("UPLOAD_PARALLEL", "8"))
+
 # ==============================
 # Premium / Support
 # ==============================
