@@ -37,7 +37,9 @@ Use /stop to clear your queue and stop processing."""
 HELP_TXT = """<b>📚 Audio Editor - Help</b>
 
 <blockquote><b>1️⃣ Set your settings</b>
-Open /start and set Artist, Cover, Title, Voice Tag, Trim, Caption and Auto Delete using the buttons. Settings stay saved.</blockquote>
+Open /start and set Artist, Cover, Title, Voice Tags, Trim, Caption and Auto Delete using the buttons. Settings stay saved.</blockquote>
+<blockquote><b>🔊 Voice Tags</b>
+Save several voice tags (Free: 2, Premium: 50). When you send an audio, choose the tag number and the second(s) where it should play, e.g. <code>15,45,58</code>. Use <b>My Voice Tags</b> to listen, rename or remove them.</blockquote>
 <blockquote><b>2️⃣ Send audio</b>
 Send any audio - the bot will download it, edit it and send it back.</blockquote>
 <blockquote><b>3️⃣ Batch Process</b>
@@ -78,8 +80,14 @@ async def build_status(uid, first_name=""):
         doc.get("cover_mode", "original"), "Keeping Original")
     artist = esc(doc.get("artist")) if doc.get("artist") else "Keeping Original"
 
-    if doc.get("voice_file_id"):
-        voice = "Set ✅" + (f" ({esc(doc.get('voice_name'))})" if doc.get("voice_name") else "")
+    from helpers import vtags
+    tags = await vtags.get_tags(uid)
+    if tags:
+        limit = await vtags.tag_limit(uid)
+        mode = await vtags.get_mode(uid)
+        voice = f"{len(tags)}/{limit} saved ✅ • Mode: {vtags.MODE_LABEL[mode]}"
+        if mode != "off" and doc.get("voice_plan"):
+            voice += f"\n      ↳ Plan: {vtags.fmt_plan(doc.get('voice_plan'), tags)}"
     else:
         voice = "Not set"
 

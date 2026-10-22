@@ -22,7 +22,7 @@ async def audio_handler(client: Client, message: Message):
     await db.get_user(uid, message.from_user.first_name)
     if uid in MERGE:
         return await actions.add_merge_item(client, message, media)
-    await actions.queue_direct_audio(client, message)
+    await actions.handle_direct_audio(client, message)
 
 
 @Client.on_message(filters.private & filters.incoming & filters.text & ~filters.regex(r"^/"), group=1)

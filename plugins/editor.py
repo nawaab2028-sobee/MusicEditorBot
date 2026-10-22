@@ -13,12 +13,13 @@ from config import COVER_DIR, FREE_DAILY_LIMIT, MERGE_MAX_FILES
 from database.db import db
 from helpers import actions, media, ui
 from helpers.links import parse_telegram_link
-from helpers.pipeline import UserError, drop_cached, ensure_voice, validate_first_link
+from helpers.pipeline import UserError, drop_cached, drop_tag_file, validate_first_link
 from helpers.planinfo import build_plan_text, plan_rows
 from helpers.state import INPUT, MERGE, PANEL, get_input, has_input, pop_input, set_input
 from helpers.utils import (esc, fmt_delay, fmt_duration, fmt_trim, make_counter_title, parse_chat_ref,
                            parse_time, parse_title_counter)
 from logger import LOGGER
+from plugins import voicetags
 
 logger = LOGGER(__name__)
 
@@ -35,6 +36,7 @@ async def _prompt(client, uid, chat_id, kind, text, rows=None, **data):
     old = get_input(uid)
     if old and old.get("prompt_id"):
         await ui.delete(client, old.get("chat_id", chat_id), [old["prompt_id"]])
+    await voicetags.on_replaced(client, old)
     pid = await ui.send(client, chat_id, text, rows=rows if rows is not None else ui.cancel_rows())
     set_input(uid, kind, prompt_id=pid, chat_id=chat_id, **data)
 
@@ -46,6 +48,11 @@ async def _finish_input(client, uid):
         await ui.delete(client, st.get("chat_id"), [st["prompt_id"]])
 
 
+async def vtags_count(uid):
+    from helpers import vtags
+    return len(await vtags.get_tags(uid))
+
+
 async def _refresh(client, uid):
     await ui.refresh_panel(client, uid, await db.get_user(uid))
 
@@ -54,7 +61,6 @@ CONFIRM_TEXT = {
     "rm_artist": "🗑 <b>Remove Artist</b>\n\nAre you sure you want to <b>remove the Artist name</b>?\n<i>Every audio will then keep its original artist.</i>",
     "rm_cover": "🗑 <b>Remove Cover</b>\n\nAre you sure you want to <b>remove the Cover</b>?\n<i>The audio will come without a cover. If you want the original cover, press \"Keep Original Cover\".</i>",
     "keep_title": "🔄 <b>Keep Original Title</b>\n\nAre you sure you want to <b>reset the Title</b>?\n<i>Every audio will then keep its original title.</i>",
-    "rm_voice": "➖ <b>Remove Voice Tag</b>\n\nAre you sure you want to <b>remove the Voice Tag</b>?",
     "rm_chan": "❌ <b>Remove Target Channel</b>\n\nAre you sure you want to <b>remove the Target Channel</b>?\n<i>The audio will be sent only in this chat.</i>",
     "caption_on": "📝 <b>Caption ON</b>\n\nAre you sure you want to turn <b>Caption ON</b>?\n<i>The audio will come with a caption.</i>",
     "caption_off": "📝 <b>Caption OFF</b>\n\nAre you sure you want to turn <b>Caption OFF</b>?\n<i>The audio will come without a caption.</i>",
@@ -116,12 +122,11 @@ async def panel_callback(client: Client, cq: CallbackQuery):
 
     # ---------- Voice tag ----------
     elif action == "voice":
-        await _prompt(client, uid, chat_id, "voice",
-                      "🔊 <b>Send me the Voice Tag</b>\n\nSend a short audio / voice note - it will be added at the <b>start</b> of every song.")
-    elif action == "rm_voice":
-        if not doc.get("voice_file_id"):
-            return await cq.answer("ℹ️ Voice Tag is not set.", show_alert=True)
-        await ui.send(client, chat_id, CONFIRM_TEXT["rm_voice"], rows=ui.confirm_rows("rm_voice"))
+        await voicetags.start_add(client, uid, chat_id)
+    elif action in ("rm_voice", "vlist"):
+        if action == "rm_voice" and not await vtags_count(uid):
+            return await cq.answer("ℹ️ No Voice Tag is saved.", show_alert=True)
+        await voicetags.show_manager(client, uid, chat_id)
 
     # ---------- Target channel ----------
     elif action == "chan":
@@ -224,7 +229,6 @@ CONFIRM_DONE = {
     "rm_artist": "✅ <b>Artist removed.</b>\nEvery audio will now keep its original artist.",
     "rm_cover": "✅ <b>Cover removed.</b>\nThe audio will now come without a cover.",
     "keep_title": "✅ <b>Title reset.</b>\nEvery audio will now keep its original title.",
-    "rm_voice": "✅ <b>Voice Tag removed.</b>",
     "rm_chan": "✅ <b>Target Channel removed.</b>",
     "caption_on": "✅ <b>Caption ON.</b>\nThe audio will now come with a caption.",
     "caption_off": "✅ <b>Caption OFF.</b>\nThe audio will now come without a caption.",
@@ -254,9 +258,6 @@ async def confirm_callback(client: Client, cq: CallbackQuery):
         drop_cached(uid, "cover")
     elif action == "keep_title":
         await db.unset_user(uid, "title", "title_inc", "title_n", "title_prefix", "title_w")
-    elif action == "rm_voice":
-        await db.unset_user(uid, "voice_file_id", "voice_unique", "voice_name", "voice_duration")
-        drop_cached(uid, "voice")
     elif action == "rm_chan":
         await db.unset_user(uid, "target_chat", "target_title")
     elif action == "caption_on":
@@ -276,7 +277,10 @@ async def confirm_callback(client: Client, cq: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^in:cancel$"))
 async def cancel_input_cb(client: Client, cq: CallbackQuery):
     uid = cq.from_user.id
-    pop_input(uid)
+    st = pop_input(uid)
+    if st and st.get("pending"):
+        drop_tag_file(uid, st["pending"])  # half-added voice tag
+    await voicetags.on_replaced(client, st)
     try:
         await cq.message.delete()
     except Exception:
@@ -455,8 +459,8 @@ async def _dispatch_input(client, message, uid, st, kind):
     # media-expecting states
     if kind == "cover":
         return await _in_cover(client, message, uid, st)
-    if kind == "voice":
-        return await _in_voice(client, message, uid, st)
+    if kind in ("voice", "voice_title", "voice_rename", "vplan_tags", "vplan_pos"):
+        return await voicetags.handle_input(client, message, uid, st, kind)
 
     # text-expecting states: if audio/media arrives, clear the state and let the audio be processed
     if text is None:
@@ -555,47 +559,6 @@ async def _in_cover(client, message, uid, st):
         pass
     await message.reply_photo(cover, caption="✅ <b>Cover set!</b>\nThis same cover will now be applied to every audio.",
                               parse_mode=HTML, quote=True)
-    await _refresh(client, uid)
-    return True
-
-
-async def _in_voice(client, message, uid, st):
-    f = message.audio or message.voice
-    if not f and message.document and (
-            (message.document.mime_type or "").startswith("audio/")):
-        f = message.document
-    if not f:
-        if message.text:
-            await message.reply_text("❌ Please send an <b>audio / voice note</b> for the Voice Tag.", parse_mode=HTML, quote=True)
-            return True
-        await _finish_input(client, uid)
-        return False
-    note = await message.reply_text("⏳ Saving the voice tag...", quote=True)
-    name = getattr(f, "file_name", None) or getattr(f, "title", None) or "Voice Tag"
-    prev = {k: (await db.get_user(uid)).get(k) for k in ("voice_file_id", "voice_unique", "voice_name", "voice_duration")}
-    await db.update_user(uid, voice_file_id=f.file_id, voice_unique=f.file_unique_id, voice_name=name,
-                         voice_duration=getattr(f, "duration", 0) or 0)
-    doc = await db.get_user(uid)
-    path = await ensure_voice(client, uid, doc)
-    ok = False
-    if path:
-        try:
-            await media.probe(path)
-            ok = True
-        except media.MediaError:
-            ok = False
-    if not ok:  # restore the previous one
-        if prev.get("voice_file_id"):
-            await db.update_user(uid, **{k: v for k, v in prev.items() if v is not None})
-        else:
-            await db.unset_user(uid, "voice_file_id", "voice_unique", "voice_name", "voice_duration")
-        await note.edit_text("❌ This does not look like a valid audio. Please send a different audio / voice note.")
-        return True
-    drop_cached(uid, "voice", keep=(os.path.basename(path),))
-    await _finish_input(client, uid)
-    await note.edit_text(
-        f"✅ <b>Voice Tag set!</b>\n🔊 {esc(name[:50])} ({fmt_duration(doc.get('voice_duration') or 0)})\n"
-        "<i>This will be added at the start of every audio.</i>", parse_mode=HTML)
     await _refresh(client, uid)
     return True
 
