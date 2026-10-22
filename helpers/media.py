@@ -101,6 +101,8 @@ async def probe(path):
         "artist": (tags.get("artist") or "").strip() or None,
         "album": (tags.get("album") or "").strip() or None,
         "codec": audio.get("codec_name"),
+        "sample_rate": int(_f(audio.get("sample_rate"), 44100)) or 44100,
+        "channels": int(_f(audio.get("channels"), 2)) or 2,
         "bitrate": bitrate,
         "has_cover": has_cover,
         "is_mp3": audio.get("codec_name") == "mp3" and "mp3" in (fmt.get("format_name") or ""),
@@ -236,6 +238,107 @@ def _chain(src, pre, length, idx, n, tail):
     return f"[{src}:a]" + ",".join(parts) + f"[{tail}]"
 
 
+async def _run_ff(cmd, what):
+    try:
+        rc, _, err = await run_cmd(cmd)
+    except FileNotFoundError:
+        raise MediaError("ffmpeg is not installed.")
+    return rc, err
+
+
+async def _tag_for(tag_path, sr, ch, br, dur):
+    """Voice tag encoded ONCE to the same mp3 format as the song (cached), so it can be joined without re-encoding the song."""
+    out = f"{tag_path}.{sr}_{ch}_{br}.mp3"
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    tmp = out + ".part"
+    af = f"afade=t=in:st=0:d={FADE},afade=t=out:st={max(0.0, dur - FADE):.4f}:d={FADE}" if dur > 4 * FADE else "anull"
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", tag_path, "-vn", "-map", "0:a:0",
+           "-map_metadata", "-1", "-af", af, "-ar", str(sr), "-ac", str(ch), "-c:a", "libmp3lame",
+           "-b:a", f"{br}k", "-write_xing", "0", "-id3v2_version", "0", "-write_id3v1", "0", "-f", "mp3", tmp]
+    rc, err = await _run_ff(cmd, "tag")
+    if rc != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+        raise MediaError(f"Could not prepare the voice tag: {_tail(err, 200)}")
+    os.replace(tmp, out)
+    return out
+
+
+async def insert_tags_fast(src, out_path, inserts, *, ts, trim_end, main_len, sample_rate, channels, bitrate_k,
+                           workdir, cover=None, title=None, artist=None, meta_src=None):
+    """
+    Place voice tags inside an MP3 WITHOUT decoding / re-encoding the song: the song is cut with stream copy
+    (frame accurate, ~26 ms) and joined with the pre-encoded tags. Seconds instead of minutes, no quality loss.
+    inserts: [(t, tag_path, tag_duration)] sorted, t counted from the trimmed start.
+    """
+    br = bitrate_k if sample_rate >= 32000 else 64
+    tag_files = {}
+    for _, path, dur in inserts:
+        if path not in tag_files:
+            tag_files[path] = asyncio.ensure_future(_tag_for(path, sample_rate, channels, br, dur))
+    try:
+        await asyncio.gather(*tag_files.values())
+    except BaseException:
+        for f in tag_files.values():
+            f.cancel()
+        raise
+
+    items = build_items(inserts, float(ts or 0.0), trim_end, float(main_len))
+    segs, order = [], []
+    for k, it in enumerate(items):
+        if it[0] == "tag":
+            order.append(tag_files[it[1]].result())
+            continue
+        _, a, b = it
+        seg = os.path.join(workdir, f"seg{k:03d}.mp3")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{a:.3f}", "-i", src]
+        if b is not None:
+            cmd += ["-t", f"{max(0.0, b - a):.3f}"]
+        cmd += ["-map", "0:a:0", "-c:a", "copy", "-map_metadata", "-1", "-write_xing", "0", "-id3v2_version", "0",
+                "-write_id3v1", "0", "-f", "mp3", seg]
+        segs.append((seg, cmd))
+        order.append(seg)
+    results = await asyncio.gather(*[_run_ff(c, "cut") for _, c in segs])
+    for (seg, _), (rc, err) in zip(segs, results):
+        if rc != 0 or not os.path.exists(seg) or os.path.getsize(seg) == 0:
+            raise MediaError(f"Could not cut the audio: {_tail(err, 200)}")
+
+    lst = os.path.join(workdir, "join.txt")
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in order:
+            f.write("file '" + p.replace("'", "'\\''") + "'\n")
+
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst]
+    idx = 1
+    if cover:
+        cmd += ["-i", cover]
+        idx += 1
+    meta_idx = 0
+    if meta_src:
+        cmd += ["-i", meta_src]
+        meta_idx = idx
+    cmd += ["-map", "0:a:0"]
+    if cover:
+        cmd += ["-map", "1:v:0", "-c:v", "copy"]
+    cmd += ["-c:a", "copy", "-map_metadata", str(meta_idx), "-id3v2_version", "3", "-write_id3v1", "1"]
+    if cover:
+        cmd += ["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)",
+                "-disposition:v", "attached_pic"]
+    if title is not None:
+        cmd += ["-metadata", f"title={title}"]
+    if artist is not None:
+        cmd += ["-metadata", f"artist={artist}"]
+    cmd += ["-f", "mp3", out_path]
+    rc, err = await _run_ff(cmd, "join")
+    for seg, _ in segs:
+        try:
+            os.remove(seg)
+        except OSError:
+            pass
+    if rc != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        raise MediaError(f"Could not join the audio: {_tail(err, 200)}")
+    return out_path
+
+
 async def concat_lossless(inputs, out_path):
     """Join several audios into one lossless (flac) temp file. Used before inserting voice tags into a merge."""
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
@@ -346,7 +449,7 @@ async def render_audio(
         cmd += ["-filter_complex", ";".join(chains), "-map", "[out]"]
         if cover:
             cmd += ["-map", f"{cover_idx}:v:0", "-c:v", "copy"]
-        cmd += ["-c:a", "libmp3lame", "-b:a", f"{bitrate_k}k"]
+        cmd += ["-c:a", "libmp3lame", "-compression_level", "7", "-b:a", f"{bitrate_k}k"]
     else:
         for p in inputs:
             cmd += ["-i", p]
@@ -373,7 +476,7 @@ async def render_audio(
         cmd += ["-filter_complex", ";".join(chains), "-map", "[out]"]
         if cover:
             cmd += ["-map", f"{cover_idx}:v:0", "-c:v", "copy"]
-        cmd += ["-c:a", "libmp3lame", "-b:a", f"{bitrate_k}k"]
+        cmd += ["-c:a", "libmp3lame", "-compression_level", "7", "-b:a", f"{bitrate_k}k"]
 
     cmd += ["-map_metadata", str(meta_idx), "-id3v2_version", "3", "-write_id3v1", "1"]
     if cover:

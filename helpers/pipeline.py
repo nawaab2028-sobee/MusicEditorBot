@@ -338,6 +338,34 @@ async def deliver(client, doc, chat_id, out_path, *, title, artist, duration, th
     return sent, target_error
 
 
+async def render_with_tags(src, out, *, info, trim_start, trim_end, eff_dur, inserts, cover, title, artist,
+                           bitrate_k, workdir, meta_src=None):
+    """
+    Voice tags inside the audio, as fast as possible:
+      mp3 source      -> cut with stream copy + join with pre-encoded tags (no decode / re-encode: seconds)
+      other formats   -> ONE mp3 encode, then the same copy-join
+    If anything goes wrong, falls back to the slower full re-encode so the user still gets the file.
+    """
+    meta_src = meta_src or src
+    try:
+        mp3, ts, te, minfo = src, trim_start, trim_end, info
+        if not info["is_mp3"]:
+            mp3 = os.path.join(workdir, "mid.mp3")
+            await media.render_audio([src], mp3, trim_start=trim_start, trim_end=trim_end, cover=None,
+                                     bitrate_k=bitrate_k)
+            ts = te = None
+            minfo = await media.probe(mp3)
+        return await media.insert_tags_fast(
+            mp3, out, inserts, ts=ts or 0.0, trim_end=te, main_len=eff_dur,
+            sample_rate=minfo["sample_rate"], channels=minfo["channels"], bitrate_k=bitrate_k,
+            workdir=workdir, cover=cover, title=title, artist=artist, meta_src=meta_src)
+    except media.MediaError as e:
+        logger.warning(f"fast voice tag join failed ({e}); using full re-encode")
+        return await media.render_audio(
+            [src], out, trim_start=trim_start, trim_end=trim_end, inserts=inserts, main_len=eff_dur,
+            cover=cover, title=title, artist=artist, bitrate_k=bitrate_k)
+
+
 # ======================================================
 # single audio
 # ======================================================
@@ -366,6 +394,7 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
 
     try:
         # 1. download
+        t_dl = time.time()
         await set_status(client, chat_id, status_id, f"{prefix}⬇️ Downloading... <b>{short}</b>")
         if pre:
             path = await pre.task
@@ -374,6 +403,7 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
                 downloader, src_msg, mediaobj, os.path.join(workdir, "in"),
                 progress=make_progress(client, chat_id, status_id, f"{prefix}⬇️ Downloading... {short}"),
             )
+        t_dl = time.time() - t_dl
         if on_downloaded:
             on_downloaded()
 
@@ -396,23 +426,36 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
         out = os.path.join(workdir, stem + ".mp3")
 
         # 4. ffmpeg
-        await media.render_audio(
-            [path], out,
-            trim_start=trim_start, trim_end=trim_end, inserts=inserts or None, main_len=eff_dur,
-            cover=cover, title=title_custom, artist=artist_custom,
-            bitrate_k=media.pick_bitrate(info["bitrate"]),
-            copy_ok=info["is_mp3"] and not inserts,
-        )
+        t_edit = time.time()
+        if inserts:
+            await render_with_tags(
+                path, out, info=info, trim_start=trim_start, trim_end=trim_end, eff_dur=eff_dur, inserts=inserts,
+                cover=cover, title=title_custom, artist=artist_custom,
+                bitrate_k=media.pick_bitrate(info["bitrate"]), workdir=workdir)
+        else:
+            await media.render_audio(
+                [path], out,
+                trim_start=trim_start, trim_end=trim_end, cover=cover,
+                title=title_custom, artist=artist_custom,
+                bitrate_k=media.pick_bitrate(info["bitrate"]),
+                copy_ok=info["is_mp3"],
+            )
+        t_edit = time.time() - t_edit
         out_info = await media.probe(out)
 
         # 5. send
         final_title = title_custom or info["title"] or getattr(mediaobj, "title", None)
         final_artist = artist_custom or info["artist"] or getattr(mediaobj, "performer", None)
+        t_up = time.time()
         sent, target_error = await deliver(
             client, doc, chat_id, out,
             title=final_title, artist=final_artist, duration=out_info["duration"], thumb=thumb,
             file_name=os.path.basename(out), status_id=status_id, label=short, fallback_name=stem,
         )
+        t_up = time.time() - t_up
+        mb = os.path.getsize(out) / 1048576
+        logger.info(f"⏱ {orig_name[:40]} | download {t_dl:.1f}s | edit {t_edit:.1f}s | upload {t_up:.1f}s "
+                    f"({mb / max(t_up, 0.01):.1f} MB/s, {mb:.1f} MB)")
 
         # 6. input delete + counters
         if input_msg_id and doc.get("delinput") is not None:
@@ -653,14 +696,15 @@ async def run_merge(client, uid, chat_id, status_id, items, panel_id=None, plan=
         if plan:
             inserts, voice_skipped = await prepare_inserts(client, uid, doc, plan, total_len)
         if inserts:
-            # merge losslessly first, then place the voice tags inside the merged audio (one MP3 encode only)
-            joined = os.path.join(workdir, "joined.flac")
-            await media.concat_lossless(paths, joined)
-            joined_len = (await media.probe(joined))["duration"]
-            await media.render_audio(
-                [joined], out, inserts=[(min(t, joined_len), p, d) for t, p, d in inserts], main_len=joined_len,
-                meta_src=paths[0], cover=cover, title=title_final, artist=artist_custom, bitrate_k=br,
-            )
+            # merge (one encode), then place the voice tags by stream copy
+            joined = os.path.join(workdir, "joined.mp3")
+            await media.render_audio(paths, joined, bitrate_k=br)
+            jinfo = await media.probe(joined)
+            await render_with_tags(
+                joined, out, info=jinfo, trim_start=None, trim_end=None, eff_dur=jinfo["duration"],
+                inserts=[(min(t, jinfo["duration"]), p, d) for t, p, d in inserts],
+                cover=cover, title=title_final, artist=artist_custom, bitrate_k=br, workdir=workdir,
+                meta_src=paths[0])
         else:
             await media.render_audio(
                 paths, out, cover=cover, title=title_final, artist=artist_custom, bitrate_k=br,

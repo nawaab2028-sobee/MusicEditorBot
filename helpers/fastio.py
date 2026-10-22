@@ -32,7 +32,7 @@ from pyrogram.errors import AuthKeyUnregistered, FloodWait
 from pyrogram.file_id import FileId, FileType
 from pyrogram.session import Auth, Session
 
-from config import DOWNLOAD_PARALLEL, UPLOAD_PARALLEL
+from config import DOWNLOAD_PARALLEL, UPLOAD_PARALLEL, UPLOAD_SESSIONS
 from logger import LOGGER
 
 logger = LOGGER(__name__)
@@ -223,7 +223,7 @@ class FastClient(Client):
             else:
                 raise ValueError("Invalid file. Expected a file path as string or a binary (not text) file pointer")
 
-            session = None
+            sessions = []
             workers = []
             ticker = None
             try:
@@ -242,15 +242,26 @@ class FastClient(Client):
                 is_big = file_size > BIG_FILE
                 md5_sum = None if is_big else md5()
                 up_id = self.rnd_id()
-                n_workers = max(1, min(UPLOAD_PARALLEL, total_parts))
-                queue = asyncio.Queue(n_workers * 2)
+                # Telegram limits the speed of ONE connection, so big files go over several connections at once
+                n_sessions = max(1, min(UPLOAD_SESSIONS, total_parts // 6))
+                per_session = max(1, min(UPLOAD_PARALLEL, math.ceil(total_parts / n_sessions)))
+                queue = asyncio.Queue(n_sessions * per_session * 2)
                 state = {"bytes": 0, "error": None}
 
-                session = Session(self, await self.storage.dc_id(), await self.storage.auth_key(),
-                                  await self.storage.test_mode(), is_media=True)
-                await session.start()
+                dc_id, auth_key, test_mode = (await self.storage.dc_id(), await self.storage.auth_key(),
+                                              await self.storage.test_mode())
 
-                async def worker():
+                async def open_session():
+                    sess = Session(self, dc_id, auth_key, test_mode, is_media=True)
+                    await sess.start()
+                    return sess
+
+                started = await asyncio.gather(*[open_session() for _ in range(n_sessions)], return_exceptions=True)
+                sessions = [x for x in started if not isinstance(x, BaseException)]
+                if not sessions:
+                    raise next(x for x in started if isinstance(x, BaseException))
+
+                async def worker(session):
                     while True:
                         item = await queue.get()
                         if item is None:
@@ -280,7 +291,7 @@ class FastClient(Client):
                         else:
                             state["error"] = last
 
-                workers = [asyncio.create_task(worker()) for _ in range(n_workers)]
+                workers = [asyncio.create_task(worker(sess)) for sess in sessions for _ in range(per_session)]
 
                 async def tick():
                     while True:
@@ -326,10 +337,7 @@ class FastClient(Client):
                     w.cancel()
                 if workers:
                     await asyncio.gather(*workers, return_exceptions=True)
-                if session is not None:
-                    try:
-                        await session.stop()
-                    except Exception:
-                        pass
+                if sessions:
+                    await asyncio.gather(*[x.stop() for x in sessions], return_exceptions=True)
                 if close_fp:
                     fp.close()
