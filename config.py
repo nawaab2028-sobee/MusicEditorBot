@@ -22,7 +22,7 @@ def _bool(name: str, default: str) -> bool:
 # Telegram Bot Credentials
 # ==============================
 
-BOT_TOKEN = _get("BOT_TOKEN", "8371349393:AAFHfStj3nkRQT50EkylBQEcUVfMnpjDnBY")
+BOT_TOKEN = _get("BOT_TOKEN", "8371349393:AAGUP1TTH4B4RbDLI7Cjv4bVXAUBl_7mTMg")
 API_ID = int(_get("API_ID", "38498066"))
 API_HASH = _get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
 
@@ -81,7 +81,8 @@ VOICE_MAX_POSITIONS = int(_get("VOICE_MAX_POSITIONS", "25"))
 
 # Transfer speed: requests kept in flight at once (1 = stock Pyrogram behaviour)
 DOWNLOAD_PARALLEL = int(_get("DOWNLOAD_PARALLEL", "6"))
-UPLOAD_PARALLEL = int(_get("UPLOAD_PARALLEL", "8"))
+UPLOAD_PARALLEL = int(_get("UPLOAD_PARALLEL", "3"))      # parts in flight per connection
+UPLOAD_SESSIONS = int(_get("UPLOAD_SESSIONS", "6"))      # parallel connections for one upload
 
 # ==============================
 # Premium / Support
