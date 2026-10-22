@@ -203,13 +203,67 @@ def _tail(text, n=400):
     return text[-n:]
 
 
+FADE = 0.012      # seconds - tiny fade on every join, removes clicks/pops at the cut points
+MIN_SEG = 0.02    # shorter pieces of the original are dropped
+NORM = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
+
+
+def build_items(inserts, ts, trim_end, main_len):
+    """
+    Split the (trimmed) original at every insert point.
+    inserts : [(t, tag_path, tag_duration)] sorted by t (t = seconds counted from the trimmed start)
+    Returns [("main", start, end|None) | ("tag", path, duration)] in play order.
+    """
+    items, prev = [], 0.0
+    for t, path, dur in inserts:
+        t = min(max(0.0, t), main_len)
+        if t - prev >= MIN_SEG:
+            items.append(("main", ts + prev, ts + t))
+            prev = t
+        items.append(("tag", path, dur))
+    if main_len - prev >= MIN_SEG:
+        items.append(("main", ts + prev, trim_end))
+    return items
+
+
+def _chain(src, pre, length, idx, n, tail):
+    parts = [pre] if pre else []
+    parts.append(NORM)
+    if idx > 0:
+        parts.append(f"afade=t=in:st=0:d={FADE}")
+    if idx < n - 1 and length is not None and length > 4 * FADE:
+        parts.append(f"afade=t=out:st={length - FADE:.4f}:d={FADE}")
+    return f"[{src}:a]" + ",".join(parts) + f"[{tail}]"
+
+
+async def concat_lossless(inputs, out_path):
+    """Join several audios into one lossless (flac) temp file. Used before inserting voice tags into a merge."""
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    for p in inputs:
+        cmd += ["-i", p]
+    chains = [f"[{i}:a]{NORM}[a{i}]" for i in range(len(inputs))]
+    chains.append("".join(f"[a{i}]" for i in range(len(inputs))) + f"concat=n={len(inputs)}:v=0:a=1[out]")
+    cmd += ["-filter_complex", ";".join(chains), "-map", "[out]", "-c:a", "flac", "-compression_level", "0",
+            "-f", "flac", out_path]
+    try:
+        rc, _, err = await run_cmd(cmd)
+    except FileNotFoundError:
+        raise MediaError("ffmpeg is not installed.")
+    if rc != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        logger.error(f"ffmpeg concat failed: {_tail(err, 1500)}")
+        raise MediaError(f"Could not merge the audios: {_tail(err, 200)}")
+    return out_path
+
+
 async def render_audio(
     inputs,
     out_path,
     *,
     trim_start=None,
     trim_end=None,
-    voice_tag=None,
+    inserts=None,
+    main_len=None,
+    meta_src=None,
     cover=None,
     title=None,
     artist=None,
@@ -220,10 +274,13 @@ async def render_audio(
     inputs      : [path, ...]  (1 file = edit, 2+ = merge)
     trim_start  : seconds (single input only)
     trim_end    : seconds, absolute end time (single input only)
-    voice_tag   : path or None -> added at the START of the song
+    inserts     : [(t, voice_tag_path, tag_duration)] sorted by t - voice tags placed inside the audio
+                  (single input only). t is counted from the start of the trimmed audio.
+    main_len    : length of the trimmed original in seconds (required with inserts)
+    meta_src    : file the original tags (album, year...) are copied from (default = first input)
     cover       : jpg path or None (None = no cover)
     title/artist: None = keep the original tag
-    copy_ok     : True = stream copy (mp3, no voice tag, single input)
+    copy_ok     : True = stream copy (mp3, no inserts, single input)
     """
     if not inputs:
         raise MediaError("No input file.")
@@ -231,11 +288,15 @@ async def render_audio(
     if not single:
         trim_start = trim_end = None
         copy_ok = False
-    if voice_tag:
+        inserts = None
+    if inserts:
         copy_ok = False
+        if not main_len or main_len <= 0:
+            raise MediaError("Internal error: audio length is unknown.")
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     n_audio = len(inputs)
+    meta_idx = 0
 
     if copy_ok:
         if trim_start:
@@ -252,40 +313,69 @@ async def render_audio(
         if cover:
             cmd += ["-map", f"{cover_idx}:v:0", "-c:v", "copy"]
         cmd += ["-c:a", "copy"]
-    else:
-        for p in inputs:
-            cmd += ["-i", p]
-        idx = n_audio
-        voice_idx = None
-        if voice_tag:
-            cmd += ["-i", voice_tag]
-            voice_idx = idx
-            idx += 1
+    elif inserts:
+        items = build_items(inserts, float(trim_start or 0.0), trim_end, float(main_len))
+        n = len(items)
+        cmd += ["-i", inputs[0]]          # input 0 = original (also the metadata source)
+        idx, used0 = 1, False
+        chains, labels = [], []
+        for k, it in enumerate(items):
+            if it[0] == "main":
+                _, a, b = it
+                if not used0:
+                    src, used0 = 0, True
+                else:
+                    cmd += ["-i", inputs[0]]
+                    src, idx = idx, idx + 1
+                pre = f"atrim=start={a:.3f}" + (f":end={b:.3f}" if b is not None else "") + ",asetpts=PTS-STARTPTS"
+                length = (b - a) if b is not None else None
+            else:
+                _, path, dur = it
+                cmd += ["-i", path]
+                src, idx = idx, idx + 1
+                pre, length = "", dur
+            chains.append(_chain(src, pre, length, k, n, f"a{k}"))
+            labels.append(f"[a{k}]")
+        chains.append("".join(labels) + f"concat=n={n}:v=0:a=1[out]")
         cover_idx = idx
         if cover:
             cmd += ["-i", cover]
+        if meta_src:
+            meta_idx = cover_idx + (1 if cover else 0)
+            cmd += ["-i", meta_src]
+        cmd += ["-filter_complex", ";".join(chains), "-map", "[out]"]
+        if cover:
+            cmd += ["-map", f"{cover_idx}:v:0", "-c:v", "copy"]
+        cmd += ["-c:a", "libmp3lame", "-b:a", f"{bitrate_k}k"]
+    else:
+        for p in inputs:
+            cmd += ["-i", p]
+        cover_idx = n_audio
+        if cover:
+            cmd += ["-i", cover]
+        if meta_src:
+            meta_idx = cover_idx + (1 if cover else 0)
+            cmd += ["-i", meta_src]
 
-        norm = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
         chains, labels = [], []
-        order = ([voice_idx] if voice_idx is not None else []) + list(range(n_audio))
-        for k, i in enumerate(order):
+        for k in range(n_audio):
             pre = ""
-            if single and i == 0 and (trim_start or trim_end is not None):
+            if single and (trim_start or trim_end is not None):
                 parts = []
                 if trim_start:
                     parts.append(f"start={trim_start:.3f}")
                 if trim_end is not None:
                     parts.append(f"end={trim_end:.3f}")
                 pre = "atrim=" + ":".join(parts) + ",asetpts=PTS-STARTPTS,"
-            chains.append(f"[{i}:a]{pre}{norm}[a{k}]")
+            chains.append(f"[{k}:a]{pre}{NORM}[a{k}]")
             labels.append(f"[a{k}]")
-        chains.append("".join(labels) + f"concat=n={len(order)}:v=0:a=1[out]")
+        chains.append("".join(labels) + f"concat=n={n_audio}:v=0:a=1[out]")
         cmd += ["-filter_complex", ";".join(chains), "-map", "[out]"]
         if cover:
             cmd += ["-map", f"{cover_idx}:v:0", "-c:v", "copy"]
         cmd += ["-c:a", "libmp3lame", "-b:a", f"{bitrate_k}k"]
 
-    cmd += ["-map_metadata", "0", "-id3v2_version", "3", "-write_id3v1", "1"]
+    cmd += ["-map_metadata", str(meta_idx), "-id3v2_version", "3", "-write_id3v1", "1"]
     if cover:
         cmd += ["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)",
                 "-disposition:v", "attached_pic"]

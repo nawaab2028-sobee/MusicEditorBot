@@ -4,6 +4,7 @@ Shared actions used by several plugins:
 """
 
 import asyncio
+from collections import defaultdict
 
 from pyrogram import enums
 
@@ -16,6 +17,7 @@ from helpers.pipeline import UserError, set_status
 from helpers.state import MERGE, clear_user_state
 from helpers.utils import esc, fmt_duration
 from logger import LOGGER
+from plugins import voicetags
 
 logger = LOGGER(__name__)
 
@@ -61,7 +63,39 @@ async def send_limit(client, uid, chat_id, reply_to=None):
 # direct audio
 # ======================================================
 
-async def queue_direct_audio(client, message):
+_GATE = defaultdict(asyncio.Lock)  # per user: audios that arrive together are handled one by one, in order
+
+
+async def voice_note(client, chat_id, res):
+    """Tell the user if some voice tag positions had to be skipped."""
+    skipped = (res or {}).get("voice_skipped")
+    if skipped:
+        try:
+            await client.send_message(
+                chat_id, "⚠️ <b>Voice tag skipped:</b> " + ", ".join(esc(x) for x in skipped[:5]),
+                parse_mode=enums.ParseMode.HTML)
+        except Exception:
+            pass
+
+
+async def handle_direct_audio(client, message):
+    """A plain audio was sent: ask for the voice tag plan if needed, then queue it."""
+    uid, chat_id = message.from_user.id, message.chat.id
+    async with _GATE[uid]:
+        if await voicetags.append_audio(client, uid, message):
+            return
+        left = await allowance_left(uid)
+        if left is not None and left <= 0:
+            return await send_limit(client, uid, chat_id, reply_to=message.id)
+
+        async def cont(plan, ctx):
+            for m in ctx["msgs"]:
+                await queue_direct_audio(client, m, plan=plan)
+
+        await voicetags.plan_gate(client, uid, chat_id, cont, scope="direct", msgs=[message])
+
+
+async def queue_direct_audio(client, message, plan=None):
     uid, chat_id = message.from_user.id, message.chat.id
     await db.get_user(uid, message.from_user.first_name)
 
@@ -80,12 +114,13 @@ async def queue_direct_audio(client, message):
         try:
             res = await pipeline.process_audio(
                 client, uid, src_msg=message, downloader=client, chat_id=chat_id,
-                status_id=status.id, input_msg_id=message.id,
+                status_id=status.id, input_msg_id=message.id, plan=plan,
             )
             try:
                 await status.delete()
             except Exception:
                 pass
+            await voice_note(client, chat_id, res)
             if res.get("target_error"):
                 await client.send_message(
                     chat_id,
@@ -114,6 +149,18 @@ async def queue_direct_audio(client, message):
 # ======================================================
 
 async def start_batch(client, message, uid, kind, target, a, b):
+    """Batch requested: ask for the voice tag plan if needed (applies to the whole batch), then queue it."""
+    left = await allowance_left(uid)
+    if left is not None and left <= 0:
+        return await send_limit(client, uid, message.chat.id, reply_to=message.id)
+
+    async def cont(plan, ctx):
+        await _start_batch_now(client, message, uid, kind, target, a, b, plan)
+
+    await voicetags.plan_gate(client, uid, message.chat.id, cont, scope="batch")
+
+
+async def _start_batch_now(client, message, uid, kind, target, a, b, plan=None):
     """Add a batch job to the queue. a..b = post id range."""
     chat_id = message.chat.id
     left = await allowance_left(uid)
@@ -131,7 +178,7 @@ async def start_batch(client, message, uid, kind, target, a, b):
     chat_id = message.chat.id
 
     async def run():
-        await pipeline.run_batch(client, uid, chat_id, status.id, kind, target, a, a + count - 1)
+        await pipeline.run_batch(client, uid, chat_id, status.id, kind, target, a, a + count - 1, plan=plan)
 
     async def dropped():
         await set_status(client, chat_id, status.id, "🛑 <b>Batch removed from the queue.</b>")
@@ -205,8 +252,24 @@ async def add_merge_item(client, message, mediaobj):
 
 
 async def start_merge(client, uid, chat_id, panel_msg_id):
+    """Merge Now pressed: ask for the voice tag plan if needed (applies to the merged audio), then queue it."""
+    st = MERGE.get(uid)
+    if not st:
+        return
+    durs = [it.get("duration") or 0 for it in st["items"]]
+    total = sum(durs) if all(durs) else None
+
+    async def cont(plan, ctx):
+        await _start_merge_now(client, uid, chat_id, panel_msg_id, plan)
+
+    await voicetags.plan_gate(client, uid, chat_id, cont, scope="merge", duration=total)
+
+
+async def _start_merge_now(client, uid, chat_id, panel_msg_id, plan=None):
     """Add the merge job to the queue (copy the items and then clear the MERGE state)."""
-    st = MERGE.pop(uid)
+    st = MERGE.pop(uid, None)
+    if not st:
+        return
     items = list(st["items"])
     n = len(items)
     ahead = queue_position(uid)
@@ -217,11 +280,12 @@ async def start_merge(client, uid, chat_id, panel_msg_id):
 
     async def run():
         try:
-            res = await pipeline.run_merge(client, uid, chat_id, panel_msg_id, items)
+            res = await pipeline.run_merge(client, uid, chat_id, panel_msg_id, items, plan=plan)
             try:
                 await client.delete_messages(chat_id, [panel_msg_id])
             except Exception:
                 pass
+            await voice_note(client, chat_id, res)
             if res.get("target_error"):
                 await client.send_message(
                     chat_id, f"⚠️ <b>Could not send to the target channel.</b>\n<code>{esc(res['target_error'])}</code>",

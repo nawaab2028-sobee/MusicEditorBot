@@ -17,7 +17,8 @@ from pyrogram.errors import FloodWait
 
 from config import (API_HASH, API_ID, BATCH_MAX_MESSAGES, COVER_DIR, DOWNLOAD_DIR, VOICE_DIR)
 from database.db import db
-from helpers import media
+from helpers import media, vtags
+from helpers.fastio import FastClient
 from helpers.autodelete import schedule_delete
 from helpers.media import MediaError
 from helpers.state import BATCH
@@ -139,23 +140,48 @@ async def ensure_custom_cover(client, uid, doc):
         return None, None
 
 
-async def ensure_voice(client, uid, doc):
-    """Local file of the voice tag (cache). Returns path or None."""
-    fid, uniq = doc.get("voice_file_id"), doc.get("voice_unique") or "x"
-    if not fid:
+def tag_path(uid, tag):
+    return os.path.join(VOICE_DIR, f"{uid}_{tag.get('unique') or 'x'}_{tag['id']}.bin")
+
+
+async def ensure_tag_file(client, uid, tag):
+    """Local file of one saved voice tag (cache). Downloads again from Telegram if missing. Returns path or None."""
+    if not tag or not tag.get("file_id"):
         return None
     os.makedirs(VOICE_DIR, exist_ok=True)
-    path = os.path.join(VOICE_DIR, f"{uid}_{uniq}.bin")
+    path = tag_path(uid, tag)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
     try:
-        got = await client.download_media(fid, file_name=path)
+        got = await client.download_media(tag["file_id"], file_name=path)
         if got and got != path and os.path.exists(got):
             shutil.move(got, path)
-        return path if os.path.exists(path) else None
+        return path if os.path.exists(path) and os.path.getsize(path) > 0 else None
     except Exception as e:
         logger.warning(f"voice tag restore failed for {uid}: {e}")
         return None
+
+
+def drop_tag_file(uid, tag):
+    try:
+        os.remove(tag_path(uid, tag))
+    except Exception:
+        pass
+
+
+_TAG_DUR = {}
+
+
+async def tag_duration(path):
+    """Exact duration of a cached tag file (ffprobe once, then memory)."""
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return 0.0
+    if key not in _TAG_DUR:
+        _TAG_DUR[key] = (await media.probe(path))["duration"]
+    return _TAG_DUR[key]
 
 
 def drop_cached(uid, kind, keep=()):
@@ -167,6 +193,69 @@ def drop_cached(uid, kind, keep=()):
                 os.remove(os.path.join(folder, f))
     except Exception:
         pass
+
+
+async def prepare_inserts(client, uid, doc, plan, eff_dur):
+    """
+    plan -> ([(t, local_path, tag_duration)], [skipped notes]).
+    Positions are counted from the start of the (trimmed) audio.
+    """
+    if not plan:
+        return [], []
+    resolved, skipped = vtags.resolve(plan, list(doc.get("voice_tags") or []), eff_dur)
+    if not resolved:
+        return [], skipped
+    uniq = {}
+    for _, tag in resolved:
+        uniq[tag["id"]] = tag
+    paths = dict(zip(uniq, await asyncio.gather(*[ensure_tag_file(client, uid, t) for t in uniq.values()])))
+    inserts = []
+    for t, tag in resolved:
+        path = paths.get(tag["id"])
+        if not path:
+            skipped.append(f"tag {esc(str(tag['name']))} (file not available)")
+            continue
+        try:
+            inserts.append((t, path, await tag_duration(path)))
+        except MediaError:
+            skipped.append(f"tag {esc(str(tag['name']))} (not a valid audio)")
+    return inserts, skipped
+
+
+# ======================================================
+# download (with check + one retry) and look-ahead
+# ======================================================
+
+async def download_audio(downloader, src_msg, mediaobj, folder, progress=None):
+    """Download one audio. Verifies the size and retries once, so a half-downloaded file is never processed."""
+    expected = int(getattr(mediaobj, "file_size", 0) or 0)
+    os.makedirs(folder, exist_ok=True)
+    for attempt in (1, 2):
+        path = await downloader.download_media(src_msg, file_name=folder + os.sep, progress=progress)
+        if path and os.path.exists(path) and (not expected or os.path.getsize(path) == expected):
+            return path
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if attempt == 1:
+            await asyncio.sleep(1)
+    raise UserError("Download failed. Please try again.")
+
+
+class Prefetch:
+    """Downloads the next audio of a batch while the current one is being processed / uploaded."""
+
+    def __init__(self, downloader, msg, uid):
+        self.workdir = os.path.join(DOWNLOAD_DIR, str(uid), uuid.uuid4().hex[:8])
+        self.task = asyncio.create_task(
+            download_audio(downloader, msg, get_audio_media(msg), os.path.join(self.workdir, "in")))
+
+    async def discard(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
 
 
 # ======================================================
@@ -253,30 +342,40 @@ async def deliver(client, doc, chat_id, out_path, *, title, artist, duration, th
 # single audio
 # ======================================================
 
-async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id, input_msg_id=None, prefix=""):
+async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id, input_msg_id=None, prefix="",
+                        plan=None, pre=None, on_downloaded=None):
     """
     Fully process one audio message and send it to the user.
-    Returns dict(name, target_error). Raises UserError / MediaError on error.
+    plan = voice tag plan (None = no voice tag), pre = Prefetch of this audio (batch look-ahead).
+    Returns dict(name, target_error, voice_skipped, voice_used). Raises UserError / MediaError on error.
     """
     mediaobj = get_audio_media(src_msg)
     if mediaobj is None:
+        if pre:
+            await pre.discard()
         raise UserError("There is no audio in this message.")
 
     doc = dict(await db.get_user(uid))  # settings snapshot
     orig_name = getattr(mediaobj, "file_name", None) or f"audio_{src_msg.id}.mp3"
     short = esc(orig_name[:60])
-    workdir = os.path.join(DOWNLOAD_DIR, str(uid), uuid.uuid4().hex[:8])
+    if pre:
+        workdir = pre.workdir
+    else:
+        workdir = os.path.join(DOWNLOAD_DIR, str(uid), uuid.uuid4().hex[:8])
     os.makedirs(os.path.join(workdir, "in"), exist_ok=True)
 
     try:
         # 1. download
         await set_status(client, chat_id, status_id, f"{prefix}⬇️ Downloading... <b>{short}</b>")
-        path = await downloader.download_media(
-            src_msg, file_name=os.path.join(workdir, "in") + os.sep,
-            progress=make_progress(client, chat_id, status_id, f"{prefix}⬇️ Downloading... {short}"),
-        )
-        if not path or not os.path.exists(path):
-            raise UserError("Download failed.")
+        if pre:
+            path = await pre.task
+        else:
+            path = await download_audio(
+                downloader, src_msg, mediaobj, os.path.join(workdir, "in"),
+                progress=make_progress(client, chat_id, status_id, f"{prefix}⬇️ Downloading... {short}"),
+            )
+        if on_downloaded:
+            on_downloaded()
 
         # 2. probe
         await set_status(client, chat_id, status_id, f"{prefix}⚙️ Processing... <b>{short}</b>")
@@ -287,8 +386,11 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
         artist_custom = doc.get("artist") or None
         title_custom = current_title(doc)
         trim_start, trim_end = compute_trim(duration, doc.get("start_trim"), doc.get("end_trim"))
-        voice = await ensure_voice(client, uid, doc) if doc.get("voice_file_id") else None
-        cover, thumb = await prepare_cover(client, downloader, uid, doc, path, info, mediaobj, workdir)
+        eff_dur = (trim_end if trim_end is not None else duration) - (trim_start or 0.0)
+        (inserts, voice_skipped), (cover, thumb) = await asyncio.gather(
+            prepare_inserts(client, uid, doc, plan, eff_dur),
+            prepare_cover(client, downloader, uid, doc, path, info, mediaobj, workdir),
+        )
 
         stem = sanitize_filename(title_custom) if title_custom else sanitize_filename(os.path.splitext(orig_name)[0])
         out = os.path.join(workdir, stem + ".mp3")
@@ -296,10 +398,10 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
         # 4. ffmpeg
         await media.render_audio(
             [path], out,
-            trim_start=trim_start, trim_end=trim_end, voice_tag=voice, cover=cover,
-            title=title_custom, artist=artist_custom,
+            trim_start=trim_start, trim_end=trim_end, inserts=inserts or None, main_len=eff_dur,
+            cover=cover, title=title_custom, artist=artist_custom,
             bitrate_k=media.pick_bitrate(info["bitrate"]),
-            copy_ok=info["is_mp3"] and not voice,
+            copy_ok=info["is_mp3"] and not inserts,
         )
         out_info = await media.probe(out)
 
@@ -317,7 +419,8 @@ async def process_audio(client, uid, *, src_msg, downloader, chat_id, status_id,
             await schedule_delete(client, chat_id, [input_msg_id], doc["delinput"])
         await db.add_traffic(uid)
         await db.advance_title(uid)
-        return {"name": os.path.basename(out), "target_error": target_error}
+        return {"name": os.path.basename(out), "target_error": target_error,
+                "voice_skipped": voice_skipped, "voice_used": len(inserts)}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -333,7 +436,7 @@ async def open_session(uid):
             "🔒 <b>Authentication Required</b>\n\n"
             "Login is required for this content. Connect your account using /login."
         )
-    acc = Client(
+    acc = FastClient(
         f"audioed_{uid}", session_string=sess, api_id=API_ID, api_hash=API_HASH,
         in_memory=True, max_concurrent_transmissions=5,
     )
@@ -407,33 +510,48 @@ async def validate_first_link(client, uid, kind, target, msg_id):
         await f.close()
 
 
-async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_id):
+async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_id, plan=None):
     ids = list(range(from_id, to_id + 1))[:BATCH_MAX_MESSAGES]
     total = len(ids)
     done = skipped = failed = 0
+    tag_skipped = 0
     errors, reason = [], None
     fetcher = Fetcher(client, uid)
     BATCH[uid] = {"done": 0, "total": total}
+    pre_map = {}   # index in msgs -> Prefetch of the next audio
     try:
         seen = 0
         for i in range(0, total, 50):
             msgs, downloader = await fetcher.get(kind, target, ids[i:i + 50])
-            for m in msgs:
+            audio_idx = [k for k, m in enumerate(msgs) if get_audio_media(m) is not None]
+            for k, m in enumerate(msgs):
                 seen += 1
                 BATCH[uid]["done"] = seen
                 if get_audio_media(m) is None:
                     skipped += 1
                     continue
+                pre = pre_map.pop(k, None)
                 rem = await db.remaining_allowance(uid)
                 if rem is not None and rem <= 0:
                     reason = "limit"
+                    if pre:
+                        await pre.discard()
                     break
+
+                def start_next(k=k):
+                    """Current audio is downloaded -> start downloading the next one in the background."""
+                    nxt = next((x for x in audio_idx if x > k), None)
+                    if nxt is not None and nxt not in pre_map:
+                        pre_map[nxt] = Prefetch(downloader, msgs[nxt], uid)
+
                 try:
-                    await process_audio(
+                    res = await process_audio(
                         client, uid, src_msg=m, downloader=downloader, chat_id=chat_id,
                         status_id=status_id, prefix=f"📁 Batch {seen}/{total}\n",
+                        plan=plan, pre=pre, on_downloaded=start_next,
                     )
                     done += 1
+                    tag_skipped += 1 if res.get("voice_skipped") else 0
                 except (UserError, MediaError) as e:
                     failed += 1
                     errors.append(f"#{m.id}: {e}")
@@ -452,6 +570,9 @@ async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_i
         reason = "error"
         errors.append(str(e))
     finally:
+        for pf in list(pre_map.values()):
+            await pf.discard()
+        pre_map.clear()
         BATCH.pop(uid, None)
         await fetcher.close()
         head = {
@@ -460,6 +581,8 @@ async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_i
             "error": "❌ <b>Batch Failed</b>",
         }.get(reason, "✅ <b>Batch Complete</b>")
         lines = [head, "", f"✅ Done: <b>{done}</b>", f"⏭ Skipped (no audio): <b>{skipped}</b>", f"❌ Failed: <b>{failed}</b>"]
+        if tag_skipped:
+            lines.append(f"🔊 Voice tag skipped (position beyond audio length) in: <b>{tag_skipped}</b>")
         if errors:
             lines += ["", "<b>Errors:</b>"] + [f"• {e if e.startswith('🔒') or e.startswith('❌') else esc(e)}" for e in errors[:5]]
         if reason == "limit":
@@ -478,7 +601,7 @@ async def run_batch(client, uid, chat_id, status_id, kind, target, from_id, to_i
 # merge
 # ======================================================
 
-async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
+async def run_merge(client, uid, chat_id, status_id, items, panel_id=None, plan=None):
     """items: [{"msg_id", "name"}] audios sent in the user's chat (in the order they were sent)."""
     doc = dict(await db.get_user(uid))
     n = len(items)
@@ -487,22 +610,31 @@ async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
     try:
         msgs = await client.get_messages(chat_id, [i["msg_id"] for i in items])
         msgs = msgs if isinstance(msgs, list) else [msgs]
-        paths, infos, first_media = [], [], None
-        for k, m in enumerate(msgs, 1):
-            mo = get_audio_media(m)
-            if mo is None:
-                continue  # the user must have deleted it
-            first_media = first_media or mo
-            label = f"🔗 Merge: {k}/{n}\n"
-            nm = esc((getattr(mo, "file_name", None) or "audio")[:50])
-            p = await client.download_media(
-                m, file_name=os.path.join(workdir, "in", f"{k:03d}") + os.sep,
-                progress=make_progress(client, chat_id, status_id, f"{label}⬇️ Downloading... {nm}"),
-            )
-            if not p:
-                raise UserError(f"{nm} could not be downloaded.")
-            paths.append(p)
-            infos.append(await media.probe(p))
+        valid = [(m, get_audio_media(m)) for m in msgs]
+        valid = [(m, mo) for m, mo in valid if mo is not None]  # the user may have deleted some
+        first_media = valid[0][1] if valid else None
+
+        # download up to 3 files at the same time (order is kept)
+        sem = asyncio.Semaphore(3)
+        finished = [0]
+
+        async def grab(k, m, mo):
+            async with sem:
+                p = await download_audio(client, m, mo, os.path.join(workdir, "in", f"{k:03d}"))
+            finished[0] += 1
+            await set_status(client, chat_id, status_id, f"🔗 Merge: ⬇️ Downloaded {finished[0]}/{len(valid)}")
+            return p
+
+        await set_status(client, chat_id, status_id, f"🔗 Merge: ⬇️ Downloading {len(valid)} audios...")
+        grabs = [asyncio.create_task(grab(k, m, mo)) for k, (m, mo) in enumerate(valid, 1)]
+        try:
+            paths = list(await asyncio.gather(*grabs))
+        except BaseException:
+            for g in grabs:
+                g.cancel()
+            await asyncio.gather(*grabs, return_exceptions=True)
+            raise
+        infos = [await media.probe(p) for p in paths]
         if len(paths) < 2:
             raise UserError("At least 2 valid audios are required for merge.")
 
@@ -510,15 +642,29 @@ async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
         first = infos[0]
         artist_custom = doc.get("artist") or None
         title_custom = current_title(doc)
-        voice = await ensure_voice(client, uid, doc) if doc.get("voice_file_id") else None
         cover, thumb = await prepare_cover(client, client, uid, doc, paths[0], first, first_media, workdir)
 
         title_final = title_custom or "Merged Audio"
         out = os.path.join(workdir, sanitize_filename(title_final, "Merged_Audio") + ".mp3")
         br = max(media.pick_bitrate(i["bitrate"]) for i in infos)
-        await media.render_audio(
-            paths, out, voice_tag=voice, cover=cover, title=title_final, artist=artist_custom, bitrate_k=br,
-        )
+
+        inserts, voice_skipped = [], []
+        total_len = sum(i["duration"] for i in infos)
+        if plan:
+            inserts, voice_skipped = await prepare_inserts(client, uid, doc, plan, total_len)
+        if inserts:
+            # merge losslessly first, then place the voice tags inside the merged audio (one MP3 encode only)
+            joined = os.path.join(workdir, "joined.flac")
+            await media.concat_lossless(paths, joined)
+            joined_len = (await media.probe(joined))["duration"]
+            await media.render_audio(
+                [joined], out, inserts=[(min(t, joined_len), p, d) for t, p, d in inserts], main_len=joined_len,
+                meta_src=paths[0], cover=cover, title=title_final, artist=artist_custom, bitrate_k=br,
+            )
+        else:
+            await media.render_audio(
+                paths, out, cover=cover, title=title_final, artist=artist_custom, bitrate_k=br,
+            )
         out_info = await media.probe(out)
         final_artist = artist_custom or first["artist"]
 
@@ -533,6 +679,7 @@ async def run_merge(client, uid, chat_id, status_id, items, panel_id=None):
             await schedule_delete(client, chat_id, ids, doc["delinput"])
         await db.add_traffic(uid, len(paths))
         await db.advance_title(uid)
-        return {"name": os.path.basename(out), "count": len(paths), "target_error": target_error}
+        return {"name": os.path.basename(out), "count": len(paths), "target_error": target_error,
+                "voice_skipped": voice_skipped, "voice_used": len(inserts)}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

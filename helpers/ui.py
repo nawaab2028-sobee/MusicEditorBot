@@ -53,6 +53,7 @@ def panel_rows(doc):
         [("🔄 Keep Original Cover", "ed:keep_cover", GREEN)],
         [("📊 Set Title", "ed:title", BLUE), ("🔄 Keep Original Title", "ed:keep_title", GREEN)],
         [("➕ Add Voice Tag", "ed:voice", BLUE), ("➖ Remove Voice Tag", "ed:rm_voice", RED)],
+        [(f"🔊 My Voice Tags ({len(doc.get('voice_tags') or [])})", "ed:vlist", GREEN)],
         [("📢 Set Target Channel", "ed:chan", BLUE), ("❌ Remove Target Channel", "ed:rm_chan", RED)],
         [("📁 Batch Process", "ed:batch", BLUE), ("🔗 Merge Audio", "ed:merge", BLUE)],
         [("📝 Caption: ON" if caption_on else "📝 Caption: OFF", "ed:caption", GREEN if caption_on else RED)],
